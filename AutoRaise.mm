@@ -28,7 +28,7 @@
 #include <Carbon/Carbon.h>
 #include <libproc.h>
 
-#define AUTORAISE_VERSION "2.9"
+#define AUTORAISE_VERSION "3.2"
 #define STACK_THRESHOLD 20
 
 // It seems OSX Monterey introduced a transparent 3 pixel border around each window. This
@@ -713,6 +713,19 @@ void onTick() {
     // delayTicks: count down as long as the mouse doesn't move
     // raiseTimes: the window needs raising a couple of times.
     if (mouseMoved || delayTicks || raiseTimes) {
+#if MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_12_0
+        if (mouseMoved) {
+            mousePoint.x += mouse_x_diff > 0 ? WINDOW_CORRECTION : -WINDOW_CORRECTION;
+            mousePoint.y += mouse_y_diff > 0 ? WINDOW_CORRECTION : -WINDOW_CORRECTION;
+            NSScreen * screen = findScreen(mousePoint);
+            if (screen) {
+                float menuBarHeight =
+                    NSHeight(screen.frame) - NSHeight(screen.visibleFrame) -
+                    (screen.visibleFrame.origin.y - screen.frame.origin.y) - 1;
+                if (mousePoint.y < menuBarHeight + MENUBAR_CORRECTION) { mousePoint.y = 0; }
+            }
+        }
+#endif
         AXUIElementRef _mouseWindow = get_mousewindow(mousePoint);
         if (_mouseWindow) {
             pid_t mouseWindow_pid;
