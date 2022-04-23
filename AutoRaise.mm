@@ -724,6 +724,9 @@ void onTick() {
                     (screen.visibleFrame.origin.y - screen.frame.origin.y) - 1;
                 if (mousePoint.y < menuBarHeight + MENUBAR_CORRECTION) { mousePoint.y = 0; }
             }
+            oldCorrectedPoint = mousePoint;
+        } else {
+            mousePoint = oldCorrectedPoint;
         }
 #endif
         AXUIElementRef _mouseWindow = get_mousewindow(mousePoint);
