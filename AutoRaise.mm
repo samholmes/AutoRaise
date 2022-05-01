@@ -28,7 +28,7 @@
 #include <Carbon/Carbon.h>
 #include <libproc.h>
 
-#define AUTORAISE_VERSION "3.2"
+#define AUTORAISE_VERSION "3.1"
 #define STACK_THRESHOLD 20
 
 // It seems OSX Monterey introduced a transparent 3 pixel border around each window. This
@@ -61,6 +61,7 @@ extern "C" CGError CGSGetCursorScale(CGSConnectionID connectionId, float *scale)
 extern "C" AXError _AXUIElementGetWindow(AXUIElementRef, CGWindowID *out);
 // Above methods are undocumented and subjective to incompatible changes
 
+static NSScreen * previousScreen = NULL;
 static char pathBuffer[PROC_PIDPATHINFO_MAXSIZE];
 static bool activated_by_task_switcher = false;
 static AXUIElementRef _accessibility_object = AXUIElementCreateSystemWide();
@@ -73,6 +74,7 @@ static CGPoint desktopOrigin = {0, 0};
 static CGPoint oldPoint = {0, 0};
 static bool spaceHasChanged = false;
 static bool appWasActivated = false;
+static bool onScreenChangedOnly = true;
 static bool mouseStop = false;
 static bool warpMouse = false;
 static bool verbose = false;
@@ -346,7 +348,6 @@ inline bool desktop_window(AXUIElementRef _window) {
     return desktop_window;
 }
 
-#if MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_12_0
 inline NSScreen * findScreen(CGPoint point) {
     point.y = NSMaxY(NSScreen.screens[0].frame) - point.y;
     for (NSScreen * screen in [NSScreen screens]) {
@@ -356,7 +357,18 @@ inline NSScreen * findScreen(CGPoint point) {
     }
     return NULL;
 }
-#endif
+
+inline bool screenChanged(CGPoint point) {
+    bool changed = false;
+    NSScreen * screen = findScreen(point);
+    if (screen) {
+        changed = previousScreen != screen;
+        previousScreen = screen;
+    }
+
+    if (verbose && changed) { NSLog(@"screen changed"); }
+    return changed;
+}
 
 //-----------------------------------------------notifications----------------------------------------------
 
@@ -713,26 +725,15 @@ void onTick() {
     // delayTicks: count down as long as the mouse doesn't move
     // raiseTimes: the window needs raising a couple of times.
     if (mouseMoved || delayTicks || raiseTimes) {
-#if MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_12_0
-        if (mouseMoved) {
-            mousePoint.x += mouse_x_diff > 0 ? WINDOW_CORRECTION : -WINDOW_CORRECTION;
-            mousePoint.y += mouse_y_diff > 0 ? WINDOW_CORRECTION : -WINDOW_CORRECTION;
-            NSScreen * screen = findScreen(mousePoint);
-            if (screen) {
-                float menuBarHeight =
-                    NSHeight(screen.frame) - NSHeight(screen.visibleFrame) -
-                    (screen.visibleFrame.origin.y - screen.frame.origin.y) - 1;
-                if (mousePoint.y < menuBarHeight + MENUBAR_CORRECTION) {
-                    mousePoint.y = NSMaxY(NSScreen.screens[0].frame) - NSMaxY(screen.frame);
-                }
-            }
-            oldCorrectedPoint = mousePoint;
-        } else {
-            mousePoint = oldCorrectedPoint;
-        }
-#endif
         AXUIElementRef _mouseWindow = get_mousewindow(mousePoint);
         if (_mouseWindow) {
+            if (onScreenChangedOnly && (raiseTimes || delayCount == 1 || delayTicks == 1) &&
+                !desktop_window(_mouseWindow) && !screenChanged(mousePoint)) {
+                CFRelease(_mouseWindow);
+                raiseTimes = 0;
+                delayTicks = 0;
+                return;
+            }
             pid_t mouseWindow_pid;
             if (AXUIElementGetPid(_mouseWindow, &mouseWindow_pid) == kAXErrorSuccess) {
                 bool needs_raise = true;
