@@ -1,7 +1,7 @@
 SKYLIGHT_AVAILABLE := $(shell test -d /System/Library/PrivateFrameworks/SkyLight.framework && echo 1 || echo 0)
 override CXXFLAGS += -O2 -Wall -fobjc-arc -D"NS_FORMAT_ARGUMENT(A)=" -D"SKYLIGHT_AVAILABLE=$(SKYLIGHT_AVAILABLE)"
 
-.PHONY: all clean install
+.PHONY: all clean install build run debug update
 
 all: AutoRaise AutoRaise.app
 
@@ -24,9 +24,12 @@ AutoRaise.app: AutoRaise Info.plist AutoRaise.icns
 	./create-app-bundle.sh
 
 build: clean
-	make CXXFLAGS="-DEXPERIMENTAL_FOCUS_FIRST"
+	make CXXFLAGS="-DOLD_ACTIVATION_METHOD -DEXPERIMENTAL_FOCUS_FIRST"
 
 run: build
-	./AutoRaise
+	./AutoRaise -focusDelay 1
+
+debug: build
+	./AutoRaise -focusDelay 1 -verbose 1
 
 update: build install

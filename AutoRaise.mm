@@ -1,5 +1,5 @@
 /*
- * AutoRaise - Copyright (C) 2024 sbmpost
+ * AutoRaise - Copyright (C) 2025 sbmpost
  * Some pieces of the code are based on
  * metamove by jmgao as part of XFree86
  *
@@ -28,7 +28,7 @@
 #include <Carbon/Carbon.h>
 #include <libproc.h>
 
-#define AUTORAISE_VERSION "5.3"
+#define AUTORAISE_VERSION "5.4"
 #define STACK_THRESHOLD 20
 
 #ifdef EXPERIMENTAL_FOCUS_FIRST
@@ -106,6 +106,14 @@ static NSArray * const mainWindowAppsWithoutTitle =@[
     @"Stickies Pro",
     @"Reeder"
 ];
+static NSArray * chromiumBrowsers = @[
+    @"Chrome",
+    @"Chromium",
+    @"Vivaldi",
+    @"Brave",
+    @"Opera",
+    @"Edge"
+];
 static NSString * const DockBundleId = @"com.apple.dock";
 static NSString * const FinderBundleId = @"com.apple.finder";
 static NSString * const LittleSnitchBundleId = @"at.obdev.littlesnitch";
@@ -176,13 +184,11 @@ void window_manager_focus_window_without_raise(
             if (verbose) { NSLog(@"Same process"); }
             uint8_t * bytes = (uint8_t *) malloc(0xf8);
             memset(bytes, 0, 0xf8);
-
             bytes[0x04] = 0xf8;
             bytes[0x08] = 0x0d;
-            memcpy(bytes + 0x3c, &focused_window_id, sizeof(uint32_t));
-            memcpy(bytes + 0x3c, &window_id, sizeof(uint32_t));
 
             bytes[0x8a] = 0x02;
+            memcpy(bytes + 0x3c, &focused_window_id, sizeof(uint32_t));
             SLPSPostEventRecordTo(_focused_window_psn, bytes);
 
             // @hack
@@ -192,6 +198,7 @@ void window_manager_focus_window_without_raise(
             usleep(10000);
 
             bytes[0x8a] = 0x01;
+            memcpy(bytes + 0x3c, &window_id, sizeof(uint32_t));
             SLPSPostEventRecordTo(_window_psn, bytes);
             free(bytes);
         }
@@ -212,8 +219,7 @@ inline void activate(pid_t pid) {
     if (!error) { SetFrontProcessWithOptions(&process, kSetFrontProcessFrontWindowOnly); }
 #else
     // Note activateWithOptions does not work properly on OSX 11.1
-    [[NSRunningApplication runningApplicationWithProcessIdentifier: pid]
-        activateWithOptions: NSApplicationActivateIgnoringOtherApps];
+    [NSRunningApplication runningApplicationWithProcessIdentifier: pid];
 #endif
 }
 
@@ -224,21 +230,21 @@ inline void raiseAndActivate(AXUIElementRef _window, pid_t window_pid) {
     }
 }
 
-NSString* getWindowTitle(AXUIElementRef window) {
+inline void logWindowTitle(NSString * prefix, AXUIElementRef _window) {
     CFStringRef _windowTitle = NULL;
-    AXUIElementCopyAttributeValue(window, kAXTitleAttribute, (CFTypeRef *) &_windowTitle);
+    AXUIElementCopyAttributeValue(_window, kAXTitleAttribute, (CFTypeRef *) &_windowTitle);
     if (_windowTitle) {
-        NSString *title = (__bridge NSString *)_windowTitle;
+        NSLog(@"%@: `%@`", prefix, _windowTitle);
         CFRelease(_windowTitle);
-        return title;
+    } else {
+        pid_t pid;
+        NSString * _appName = NULL;
+        if (AXUIElementGetPid(_window, &pid) == kAXErrorSuccess) {
+            _appName = [NSRunningApplication runningApplicationWithProcessIdentifier: pid].localizedName;
+        }
+        if (_appName) { NSLog(@"%@ (app name): `%@`", prefix, _appName); }
+        else { NSLog(@"%@: null", prefix); }
     }
-
-    pid_t pid;
-    if (AXUIElementGetPid(window, &pid) == kAXErrorSuccess) {
-        NSString *appName = [NSRunningApplication runningApplicationWithProcessIdentifier:pid].localizedName;
-        return appName ?: @"(no title)";
-    }
-    return @"(no title)";
 }
 
 // TODO: does not take into account different languages
@@ -246,13 +252,13 @@ inline bool titleEquals(AXUIElementRef _element, NSArray * _titles, NSArray * _p
     bool equal = false;
     CFStringRef _elementTitle = NULL;
     AXUIElementCopyAttributeValue(_element, kAXTitleAttribute, (CFTypeRef *) &_elementTitle);
-    if (logTitle) { NSLog(@"element title: %@", _elementTitle); }
+    if (logTitle) { NSLog(@"element title: `%@`", _elementTitle); }
     if (_elementTitle) {
         NSString * _title = (__bridge NSString *) _elementTitle;
         equal = [_titles containsObject: _title];
         if (!equal && _patterns) {
             for (NSString * _pattern in _patterns) {
-                equal = [_title rangeOfString:_pattern options:NSRegularExpressionSearch].location != NSNotFound;
+                equal = [_title rangeOfString: _pattern options: NSRegularExpressionSearch].location != NSNotFound;
                 if (equal) { break; }
             }
         }
@@ -437,31 +443,27 @@ AXUIElementRef get_mousewindow(CGPoint point) {
         // fallback, happens for apps that do not support the Accessibility API
         if (verbose) { NSLog(@"Copy element: no accessibility support"); }
         _window = fallback(point);
+    } else if (error == kAXErrorIllegalArgument) {
+        // fallback, happens for Progressive Web Apps (PWAs)
+        if (verbose) { NSLog(@"Copy element: illegal argument"); }
+        _window = fallback(point);
     } else if (error == kAXErrorNoValue) {
         // fallback, happens sometimes when switching to another app (with cmd-tab)
         if (verbose) { NSLog(@"Copy element: no value"); }
         _window = fallback(point);
     } else if (error == kAXErrorAttributeUnsupported) {
-        // no fallback, happens when hovering into volume/wifi menubar window
+        // no fallback, happens when hovering into volume/WiFi menubar window
         if (verbose) { NSLog(@"Copy element: attribute unsupported"); }
     } else if (error == kAXErrorFailure) {
         // no fallback, happens when hovering over the menubar itself
         if (verbose) { NSLog(@"Copy element: failure"); }
-    } else if (error == kAXErrorIllegalArgument) {
-        // fallback, happens in (Open, Save) dialogs but we want to raise PWAs
-        if (verbose) { NSLog(@"Copy element: illegal argument"); }
-        _window = fallback(point);
     } else if (verbose) {
         NSLog(@"Copy element: AXError %d", error);
     }
 
     if (verbose) {
-        if (_window) {
-            CFStringRef _windowTitle = NULL;
-            AXUIElementCopyAttributeValue(_window, kAXTitleAttribute, (CFTypeRef *) &_windowTitle);
-            NSLog(@"Mouse window: %@", getWindowTitle(_window));
-            if (_windowTitle) { CFRelease(_windowTitle); }
-        } else { NSLog(@"No raisable window"); }
+        if (_window) { logWindowTitle(@"Mouse window", _window); }
+        else { NSLog(@"No raisable window"); }
     }
 
     return _window;
@@ -650,9 +652,8 @@ inline bool is_main_window(AXUIElementRef _app, AXUIElementRef _window, bool chr
 
 inline bool is_chrome_app(NSString * bundleIdentifier) {
     NSArray * components = [bundleIdentifier componentsSeparatedByString: @"."];
-    NSArray *chromiumBrowsers = @[@"Chrome", @"Vivaldi", @"Edge", @"Brave", @"Chromium"];
     return components.count > 4 &&
-           [chromiumBrowsers containsObject:components[2]] &&
+           [chromiumBrowsers containsObject: components[2]] &&
            [components[3] isEqual: @"app"];
 }
 
@@ -776,7 +777,6 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
 @interface ConfigClass:NSObject
 - (NSString *) getFilePath:(NSString *) filename;
 - (void) readConfig:(int) argc;
-- (void) readOriginalConfig;
 - (void) readHiddenConfig;
 - (void) validateParameters;
 @end
@@ -803,65 +803,34 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
     return;
 }
 
-- (void) readOriginalConfig {
-    // original config files:
-    NSString *delayFilePath = [self getFilePath: @"AutoRaise.delay"];
-    NSString *warpFilePath = [self getFilePath: @"AutoRaise.warp"];
-
-    if (delayFilePath || warpFilePath) {
-        NSFileHandle *hDelayFile = [NSFileHandle fileHandleForReadingAtPath: delayFilePath];
-        if (hDelayFile) {
-            parameters[kDelay] = @(abs([[[NSString alloc]
-                initWithData: [hDelayFile readDataOfLength: 2]
-                encoding: NSUTF8StringEncoding] intValue]));
-            [hDelayFile closeFile];
-        }
-
-        NSFileHandle *hWarpFile = [NSFileHandle fileHandleForReadingAtPath: warpFilePath];
-        if (hWarpFile) {
-            NSString *line = [[NSString alloc]
-                initWithData: [hWarpFile readDataOfLength:11]
-                encoding: NSUTF8StringEncoding];
-            NSArray *components = [line componentsSeparatedByString: @" "];
-            if (components.count >= 1) { parameters[kWarpX] = @([[components objectAtIndex:0] floatValue]); }
-            if (components.count >= 2) { parameters[kWarpY] = @([[components objectAtIndex:1] floatValue]); }
-            if (components.count >= 3) { parameters[kScale] = @([[components objectAtIndex:2] floatValue]); }
-            [hWarpFile closeFile];
-        }
-    }
-    return;
-}
-
 - (void) readHiddenConfig {
     // search for dotfiles
-    NSString *hiddenConfigFilePath = [self getFilePath: @".AutoRaise"];
+    NSString * hiddenConfigFilePath = [self getFilePath: @".AutoRaise"];
     if (!hiddenConfigFilePath) { hiddenConfigFilePath = [self getFilePath: @".config/AutoRaise/config"]; }
 
     if (hiddenConfigFilePath) {
-        NSError *error;
-        NSString *configContent = [[NSString alloc]
+        NSError * error;
+        NSString * configContent = [[NSString alloc]
             initWithContentsOfFile: hiddenConfigFilePath
             encoding: NSUTF8StringEncoding error: &error];
 
-        NSArray *configLines = [configContent componentsSeparatedByString:@"\n"];
-        NSString *trimmedLine, *trimmedKey, *trimmedValue, *noQuotesValue;
-        NSArray *components;
-        for (NSString *line in configLines) {
+        NSArray * configLines = [configContent componentsSeparatedByString: @"\n"];
+        NSString * trimmedLine, * trimmedKey, * trimmedValue, * noQuotesValue;
+        NSArray * components;
+        for (NSString * line in configLines) {
             trimmedLine = [line stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]];
-            if (not [trimmedLine hasPrefix:@"#"]) {
-                components = [trimmedLine componentsSeparatedByString:@"="];
+            if (not [trimmedLine hasPrefix: @"#"]) {
+                components = [trimmedLine componentsSeparatedByString: @"="];
                 if ([components count] == 2) {
                     for (id key in parametersDictionary) {
                        trimmedKey = [components[0] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]];
                        trimmedValue = [components[1] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]];
-                       noQuotesValue = [trimmedValue stringByReplacingOccurrencesOfString:@"\"" withString:@""];
+                       noQuotesValue = [trimmedValue stringByReplacingOccurrencesOfString: @"\"" withString: @""];
                        if ([trimmedKey isEqual: key]) { parameters[key] = noQuotesValue; }
                     }
                 }
             }
         }
-    } else {
-        [self readOriginalConfig];
     }
     return;
 }
@@ -1149,13 +1118,7 @@ void onTick() {
                         kAXFocusedWindowAttribute,
                         (CFTypeRef *) &_focusedWindow);
                     if (_focusedWindow) {
-                        if (verbose) {
-                            CFStringRef _windowTitle = NULL;
-                            AXUIElementCopyAttributeValue(_focusedWindow,
-                                kAXTitleAttribute, (CFTypeRef *) &_windowTitle);
-                            NSLog(@"Focused window: %@", getWindowTitle(_focusedWindow));
-                            if (_windowTitle) { CFRelease(_windowTitle); }
-                        }
+                        if (verbose) { logWindowTitle(@"Focused window", _focusedWindow); }
                         _AXUIElementGetWindow(_focusedWindow, &focusedWindow_id);
                         needs_raise = mouseWindow_id != focusedWindow_id;
 #ifdef FOCUS_FIRST
@@ -1305,7 +1268,7 @@ int main(int argc, const char * argv[]) {
         ignoreSpaceChanged = [parameters[kIgnoreSpaceChanged] boolValue];
         invertIgnoreApps   = [parameters[kInvertIgnoreApps] boolValue];
 
-        printf("\nv%s by sbmpost(c) 2024, usage:\n\nAutoRaise\n", AUTORAISE_VERSION);
+        printf("\nv%s by sbmpost(c) 2025, usage:\n\nAutoRaise\n", AUTORAISE_VERSION);
         printf("  -pollMillis <20, 30, 40, 50, ...>\n");
         printf("  -delay <0=no-raise, 1=no-delay, 2=%dms, 3=%dms, ...>\n", pollMillis, pollMillis*2);
 #ifdef FOCUS_FIRST
@@ -1363,7 +1326,7 @@ int main(int argc, const char * argv[]) {
         NSMutableArray * ignoreT;
         if (parameters[kIgnoreTitles]) {
             ignoreT = [[NSMutableArray alloc] initWithArray:
-                [parameters[kIgnoreTitles] componentsSeparatedByString:@","]];
+                [parameters[kIgnoreTitles] componentsSeparatedByString: @","]];
         } else { ignoreT = [[NSMutableArray alloc] init]; }
 
         for (id ignoreTitle in ignoreT) {
@@ -1374,7 +1337,7 @@ int main(int argc, const char * argv[]) {
         NSMutableArray * stayFocused;
         if (parameters[kStayFocusedBundleIds]) {
             stayFocused = [[NSMutableArray alloc] initWithArray:
-                [parameters[kStayFocusedBundleIds] componentsSeparatedByString:@","]];
+                [parameters[kStayFocusedBundleIds] componentsSeparatedByString: @","]];
         } else { stayFocused = [[NSMutableArray alloc] init]; }
 
         for (id stayFocusedBundleId in stayFocused) {

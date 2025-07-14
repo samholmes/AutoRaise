@@ -155,7 +155,7 @@ like so:
 
 The output should look something like this:
 
-    v5.3 by sbmpost(c) 2024, usage:
+    v5.4 by sbmpost(c) 2025, usage:
 
     AutoRaise
       -pollMillis <20, 30, 40, 50, ...>
@@ -176,29 +176,21 @@ The output should look something like this:
       * pollMillis: 50ms
       * delay: 0ms
       * focusDelay: disabled
-      * warpX: 0.5, warpY: 0.1, scale: 2.5
-      * altTaskSwitcher: false
       * ignoreSpaceChanged: false
       * invertIgnoreApps: false
-      * ignoreApp: App1
-      * ignoreApp: App2
-      * ignoreTitle: Regex1
-      * ignoreTitle: Regex2
-      * stayFocusedBundleId: Id1
-      * stayFocusedBundleId: Id2
       * disableKey: control
-      * mouseDelta: 2.0
       * verbose: true
 
     Compiled with:
       * OLD_ACTIVATION_METHOD
       * EXPERIMENTAL_FOCUS_FIRST
 
-    2024-04-09 10:55:27.903 AutoRaise[40260:3886758] AXIsProcessTrusted: YES
-    2024-04-09 10:55:27.922 AutoRaise[40260:3886758] System cursor scale: 1.000000
-    2024-04-09 10:55:27.936 AutoRaise[40260:3886758] Got run loop source: YES
-    2024-04-09 10:55:27.975 AutoRaise[40260:3886758] Registered app activated selector
-    2024-04-09 10:55:27.995 AutoRaise[40260:3886758] Desktop origin (-1920.000000, -360.000000)
+    2025-07-14 14:25:56.192 AutoRaise[44780:1615626] AXIsProcessTrusted: YES
+    2025-07-14 14:25:56.216 AutoRaise[44780:1615626] System cursor scale: 1.000000
+    2025-07-14 14:25:56.234 AutoRaise[44780:1615626] Got run loop source: YES
+    2025-07-14 14:25:56.284 AutoRaise[44780:1615626] Mouse window: AutoRaise — AutoRaise -verbose 1
+    2025-07-14 14:25:56.285 AutoRaise[44780:1615626] Focused window: AutoRaise — AutoRaise -verbose 1
+    2025-07-14 14:25:56.287 AutoRaise[44780:1615626] Desktop origin (-1920.000000, -360.000000)
     ...
     ...
 
