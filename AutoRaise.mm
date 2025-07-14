@@ -216,6 +216,23 @@ inline void raiseAndActivate(AXUIElementRef _window, pid_t window_pid) {
     }
 }
 
+NSString* getWindowTitle(AXUIElementRef window) {
+    CFStringRef _windowTitle = NULL;
+    AXUIElementCopyAttributeValue(window, kAXTitleAttribute, (CFTypeRef *) &_windowTitle);
+    if (_windowTitle) {
+        NSString *title = (__bridge NSString *)_windowTitle;
+        CFRelease(_windowTitle);
+        return title;
+    }
+
+    pid_t pid;
+    if (AXUIElementGetPid(window, &pid) == kAXErrorSuccess) {
+        NSString *appName = [NSRunningApplication runningApplicationWithProcessIdentifier:pid].localizedName;
+        return appName ?: @"(no title)";
+    }
+    return @"(no title)";
+}
+
 // TODO: does not take into account different languages
 inline bool titleEquals(AXUIElementRef _element, NSArray * _titles, NSArray * _patterns = NULL, bool logTitle = false) {
     bool equal = false;
@@ -423,8 +440,9 @@ AXUIElementRef get_mousewindow(CGPoint point) {
         // no fallback, happens when hovering over the menubar itself
         if (verbose) { NSLog(@"Copy element: failure"); }
     } else if (error == kAXErrorIllegalArgument) {
-        // no fallback, happens in (Open, Save) dialogs
+        // fallback, happens in (Open, Save) dialogs but we want to raise PWAs
         if (verbose) { NSLog(@"Copy element: illegal argument"); }
+        _window = fallback(point);
     } else if (verbose) {
         NSLog(@"Copy element: AXError %d", error);
     }
@@ -433,7 +451,7 @@ AXUIElementRef get_mousewindow(CGPoint point) {
         if (_window) {
             CFStringRef _windowTitle = NULL;
             AXUIElementCopyAttributeValue(_window, kAXTitleAttribute, (CFTypeRef *) &_windowTitle);
-            NSLog(@"Mouse window: %@", _windowTitle);
+            NSLog(@"Mouse window: %@", getWindowTitle(_window));
             if (_windowTitle) { CFRelease(_windowTitle); }
         } else { NSLog(@"No raisable window"); }
     }
@@ -624,7 +642,10 @@ inline bool is_main_window(AXUIElementRef _app, AXUIElementRef _window, bool chr
 
 inline bool is_chrome_app(NSString * bundleIdentifier) {
     NSArray * components = [bundleIdentifier componentsSeparatedByString: @"."];
-    return components.count > 4 && [components[2] isEqual: @"Chrome"] && [components[3] isEqual: @"app"];
+    NSArray *chromiumBrowsers = @[@"Chrome", @"Vivaldi", @"Edge", @"Brave", @"Chromium"];
+    return components.count > 4 &&
+           [chromiumBrowsers containsObject:components[2]] &&
+           [components[3] isEqual: @"app"];
 }
 
 //-----------------------------------------------notifications----------------------------------------------
@@ -1124,7 +1145,7 @@ void onTick() {
                             CFStringRef _windowTitle = NULL;
                             AXUIElementCopyAttributeValue(_focusedWindow,
                                 kAXTitleAttribute, (CFTypeRef *) &_windowTitle);
-                            NSLog(@"Focused window: %@", _windowTitle);
+                            NSLog(@"Focused window: %@", getWindowTitle(_focusedWindow));
                             if (_windowTitle) { CFRelease(_windowTitle); }
                         }
                         _AXUIElementGetWindow(_focusedWindow, &focusedWindow_id);
