@@ -17,7 +17,7 @@ See also [on stackoverflow](https://stackoverflow.com/questions/98310/focus-foll
 
 *Important*: When you enable Accessibility in System Preferences, if you see an older AutoRaise item with balloon icon in the
 Accessibility pane, first remove it **completely** (clicking the minus). Then stop and start AutoRaise by left clicking the balloon
-icon, and the item should re-appear so that you can properly enable Accessibility.
+icon. The item should re-appear so that you can properly enable Accessibility.
 
 **Compiling AutoRaise**
 
