@@ -6,13 +6,14 @@ See also [on stackoverflow](https://stackoverflow.com/questions/98310/focus-foll
 
 **Quick start**
 
-1. Download the [disk image](https://github.com/sbmpost/AutoRaise/blob/master/AutoRaise.dmg)
-2. Double click the downloaded .dmg in Finder.
-3. In finder, look for mounted disk image on side bar at left.
-4. Drag the AutoRaise.app into the Applications folder.
-5. Then open AutoRaise from Applications.
-6. Left click the menu bar balloon at top to give permissions to AutoRaise in System/Accessibility.
-7. Right click the menu bar balloon at top, then select preferences.
+1. Download the [latest release](https://github.com/sbmpost/AutoRaise/releases/latest)
+2. In Finder, double click the downloaded file to unpack.
+3. Locate the unpacked folder and double click AutoRaise.dmg
+4. Single click AutoRaise under "Locations" in Finder.
+5. Drag AutoRaise.app into the Applications folder.
+6. Open AutoRaise from Applications.
+7. Left click the balloon icon in the menu bar to give permissions to AutoRaise in System/Accessibility.
+8. Right click the balloon icon in the menu bar to set preferences.
 
 *Important*: When you enable Accessibility in System Preferences, if you see an older AutoRaise item with balloon icon in the
 Accessibility pane, first remove it **completely** (clicking the minus). Then stop and start AutoRaise by left clicking the balloon
