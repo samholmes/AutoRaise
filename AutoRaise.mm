@@ -136,6 +136,7 @@ static bool appWasActivated = false;
 static bool altTaskSwitcher = false;
 static bool warpMouse = false;
 static bool verbose = false;
+static bool focusOnDemand = false;
 static float warpX = 0.5;
 static float warpY = 0.5;
 static float oldScale = 1;
@@ -657,6 +658,123 @@ inline bool is_chrome_app(NSString * bundleIdentifier) {
            [components[3] isEqual: @"app"];
 }
 
+//---------------------------------------------focus-on-demand methods------------------------------------------
+
+CGPoint applyCorrectionToPoint(CGPoint mousePoint) {
+    if (@available(macOS 12.00, *)) {
+        // Apply same correction logic as in onTick() for macOS Monterey+ window borders
+        NSScreen * screen = findScreen(mousePoint);
+        if (screen) {
+            NSScreen * main_screen = NSScreen.screens[0];
+            float screenOriginX = NSMinX(screen.frame) - NSMinX(main_screen.frame);
+            float screenOriginY = NSMaxY(main_screen.frame) - NSMaxY(screen.frame);
+
+            if (mousePoint.x > screenOriginX + NSWidth(screen.frame) - WINDOW_CORRECTION) {
+                mousePoint.x = screenOriginX + NSWidth(screen.frame) - 1;
+            } else if (mousePoint.x < screenOriginX + WINDOW_CORRECTION - 1) {
+                mousePoint.x = screenOriginX + 1;
+            }
+
+            if (mousePoint.y > screenOriginY + NSHeight(screen.frame) - WINDOW_CORRECTION) {
+                mousePoint.y = screenOriginY + NSHeight(screen.frame) - 1;
+            } else {
+                float menuBarHeight = fmax(0, NSMaxY(screen.frame) - NSMaxY(screen.visibleFrame) - 1);
+                if (mousePoint.y < screenOriginY + menuBarHeight + MENUBAR_CORRECTION) {
+                    mousePoint.y = screenOriginY;
+                }
+            }
+        }
+    }
+    return mousePoint;
+}
+
+bool shouldFocusWindow(AXUIElementRef _window, pid_t window_pid) {
+    if (!_window) return false;
+    
+    bool needs_raise = !invertIgnoreApps;
+    AXUIElementRef _windowApp = AXUIElementCreateApplication(window_pid);
+    
+    if (needs_raise && titleEquals(_window, @[NoTitle, Untitled])) {
+        needs_raise = is_main_window(_windowApp, _window, is_chrome_app(
+            [NSRunningApplication runningApplicationWithProcessIdentifier: window_pid].bundleIdentifier));
+        if (verbose && !needs_raise) { NSLog(@"Excluding window"); }
+    } else if (needs_raise &&
+        titleEquals(_window, @[BartenderBar, Zim, AppStoreSearchResults], ignoreTitles)) {
+        needs_raise = false;
+        if (verbose) { NSLog(@"Excluding window"); }
+    } else {
+        if (titleEquals(_windowApp, ignoreApps)) {
+            needs_raise = invertIgnoreApps;
+            if (verbose) {
+                if (invertIgnoreApps) {
+                    NSLog(@"Including app");
+                } else {
+                    NSLog(@"Excluding app");
+                }
+            }
+        }
+    }
+    
+    CFRelease(_windowApp);
+    return needs_raise;
+}
+
+void handleFocusOnDemand(CGEventRef event) {
+    if (verbose) { NSLog(@"Focus-on-demand triggered"); }
+    
+    // Get mouse position from the event
+    CGPoint mousePoint = CGEventGetLocation(event);
+    
+    // Apply mouse correction for macOS Monterey+ window borders
+    mousePoint = applyCorrectionToPoint(mousePoint);
+    
+    // Find window under cursor
+    AXUIElementRef _targetWindow = get_mousewindow(mousePoint);
+    if (_targetWindow) {
+        pid_t targetWindow_pid;
+        if (AXUIElementGetPid(_targetWindow, &targetWindow_pid) == kAXErrorSuccess) {
+            
+            // Apply filtering logic
+            if (shouldFocusWindow(_targetWindow, targetWindow_pid)) {
+                
+                // Check if target window is different from currently focused window
+                bool needsFocus = true;
+                NSRunningApplication *frontmostApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
+                pid_t frontmost_pid = frontmostApp.processIdentifier;
+                
+                if (targetWindow_pid == frontmost_pid) {
+                    // Same application - check if it's the same window
+                    AXUIElementRef _frontmostApp = AXUIElementCreateApplication(frontmost_pid);
+                    AXUIElementRef _focusedWindow = NULL;
+                    AXUIElementCopyAttributeValue(_frontmostApp, kAXFocusedWindowAttribute, (CFTypeRef *) &_focusedWindow);
+                    
+                    if (_focusedWindow) {
+                        // Compare window IDs to see if they're the same window
+                        CGWindowID targetWindowID, focusedWindowID;
+                        if (_AXUIElementGetWindow(_targetWindow, &targetWindowID) == kAXErrorSuccess &&
+                            _AXUIElementGetWindow(_focusedWindow, &focusedWindowID) == kAXErrorSuccess) {
+                            needsFocus = (targetWindowID != focusedWindowID);
+                        }
+                        CFRelease(_focusedWindow);
+                    }
+                    CFRelease(_frontmostApp);
+                }
+                
+                if (needsFocus) {
+                    if (verbose) { NSLog(@"Focus-on-demand: raising window"); }
+                    
+                    // Focus/raise BEFORE event continues to application
+                    raiseAndActivate(_targetWindow, targetWindow_pid);
+                    
+                    // Small delay to ensure focus completes before input reaches application
+                    usleep(1000); // 1ms
+                }
+            }
+        }
+        CFRelease(_targetWindow);
+    }
+}
+
 //-----------------------------------------------notifications----------------------------------------------
 
 void spaceChanged();
@@ -762,15 +880,16 @@ const NSString *kIgnoreTitles = @"ignoreTitles";
 const NSString *kMouseDelta = @"mouseDelta";
 const NSString *kPollMillis = @"pollMillis";
 const NSString *kDisableKey = @"disableKey";
+const NSString *kFocusOnDemand = @"focusOnDemand";
 #ifdef FOCUS_FIRST
 const NSString *kFocusDelay = @"focusDelay";
 NSArray *parametersDictionary = @[kDelay, kWarpX, kWarpY, kScale, kVerbose, kAltTaskSwitcher,
     kFocusDelay, kIgnoreSpaceChanged, kInvertIgnoreApps, kIgnoreApps, kIgnoreTitles,
-    kStayFocusedBundleIds, kDisableKey, kMouseDelta, kPollMillis];
+    kStayFocusedBundleIds, kDisableKey, kMouseDelta, kPollMillis, kFocusOnDemand];
 #else
 NSArray *parametersDictionary = @[kDelay, kWarpX, kWarpY, kScale, kVerbose, kAltTaskSwitcher,
     kIgnoreSpaceChanged, kInvertIgnoreApps, kIgnoreApps, kIgnoreTitles, kStayFocusedBundleIds,
-    kDisableKey, kMouseDelta, kPollMillis];
+    kDisableKey, kMouseDelta, kPollMillis, kFocusOnDemand];
 #endif
 NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
 
@@ -851,6 +970,11 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
     warpMouse =
         parameters[kWarpX] && [parameters[kWarpX] floatValue] >= 0 && [parameters[kWarpX] floatValue] <= 1 &&
         parameters[kWarpY] && [parameters[kWarpY] floatValue] >= 0 && [parameters[kWarpY] floatValue] <= 1;
+    
+    // When focus-on-demand is enabled, disable timer-based raising
+    if ([parameters[kFocusOnDemand] boolValue]) {
+        parameters[kDelay] = @"0";
+    }
 #ifdef ALTERNATIVE_TASK_SWITCHER
     if (!parameters[kAltTaskSwitcher]) { parameters[kAltTaskSwitcher] = @"true"; }
 #endif
@@ -951,6 +1075,16 @@ bool appActivated() {
 }
 
 void onTick() {
+    // When focus-on-demand is enabled, disable all auto-raise logic
+    if (focusOnDemand) {
+        // Still track mouse position for correction calculations
+        CGEventRef _event = CGEventCreate(NULL);
+        CGPoint mousePoint = CGEventGetLocation(_event);
+        if (_event) { CFRelease(_event); }
+        oldPoint = mousePoint;
+        return;
+    }
+    
     // determine if mouseMoved
     CGEventRef _event = CGEventCreate(NULL);
     CGPoint mousePoint = CGEventGetLocation(_event);
@@ -1215,6 +1349,16 @@ void onTick() {
 }
 
 CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
+    // Focus-on-demand logic - handle BEFORE existing task switcher logic
+    if (focusOnDemand && (type == kCGEventKeyDown || 
+                         type == kCGEventFlagsChanged ||
+                         type == kCGEventLeftMouseDown ||
+                         type == kCGEventRightMouseDown ||
+                         type == kCGEventOtherMouseDown ||
+                         type == kCGEventScrollWheel)) {
+        handleFocusOnDemand(event);
+    }
+    
     static bool commandTabPressed = false;
     if (type == kCGEventFlagsChanged && commandTabPressed) {
         if (!activated_by_task_switcher) {
@@ -1267,6 +1411,7 @@ int main(int argc, const char * argv[]) {
         pollMillis         = [parameters[kPollMillis] intValue];
         ignoreSpaceChanged = [parameters[kIgnoreSpaceChanged] boolValue];
         invertIgnoreApps   = [parameters[kInvertIgnoreApps] boolValue];
+        focusOnDemand      = [parameters[kFocusOnDemand] boolValue];
 
         printf("\nv%s by sbmpost(c) 2025, usage:\n\nAutoRaise\n", AUTORAISE_VERSION);
         printf("  -pollMillis <20, 30, 40, 50, ...>\n");
@@ -1283,6 +1428,7 @@ int main(int argc, const char * argv[]) {
         printf("  -stayFocusedBundleIds \"<Id1,Id2,...>\"\n");
         printf("  -disableKey <control|option|disabled>\n");
         printf("  -mouseDelta <0.1>\n");
+        printf("  -focusOnDemand <true|false>\n");
         printf("  -verbose <true|false>\n\n");
 
         printf("Started with:\n");
@@ -1355,6 +1501,7 @@ int main(int argc, const char * argv[]) {
 
         if (mouseDelta) { printf("  * mouseDelta: %.1f\n", mouseDelta); }
 
+        printf("  * focusOnDemand: %s\n", focusOnDemand ? "true" : "false");
         printf("  * verbose: %s\n", verbose ? "true" : "false");
 #if defined OLD_ACTIVATION_METHOD or defined FOCUS_FIRST or defined ALTERNATIVE_TASK_SWITCHER
         printf("\nCompiled with:\n");
@@ -1378,9 +1525,18 @@ int main(int argc, const char * argv[]) {
         if (verbose) { NSLog(@"System cursor scale: %f", oldScale); }
 
         CFRunLoopSourceRef runLoopSource = NULL;
+        CGEventMask eventMask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged);
+        
+        // Add additional events for focus-on-demand mode
+        if (focusOnDemand) {
+            eventMask |= CGEventMaskBit(kCGEventLeftMouseDown) |
+                        CGEventMaskBit(kCGEventRightMouseDown) |
+                        CGEventMaskBit(kCGEventOtherMouseDown) |
+                        CGEventMaskBit(kCGEventScrollWheel);
+        }
+        
         eventTap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
-            CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged),
-            eventTapHandler, NULL);
+            eventMask, eventTapHandler, NULL);
         if (eventTap) {
             runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0);
             if (runLoopSource) {
