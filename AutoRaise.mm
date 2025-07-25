@@ -1349,47 +1349,51 @@ void onTick() {
 }
 
 CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
-    // Focus-on-demand logic - handle BEFORE existing task switcher logic
-    if (focusOnDemand && (type == kCGEventKeyDown || 
+    static bool commandTabPressed = false;
+    if (type == kCGEventFlagsChanged && commandTabPressed) {
+        if (!activated_by_task_switcher) {
+            activated_by_task_switcher = true;
+            // Extend ignore period for focus-on-demand to prevent race condition
+            ignoreTimes = focusOnDemand ? 30 : 3;
+        }
+    }
+
+    commandTabPressed = false;
+    if (type == kCGEventKeyDown) {
+        CGKeyCode keycode = (CGKeyCode) CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        if (keycode == kVK_Tab) {
+            CGEventFlags flags = CGEventGetFlags(event);
+            commandTabPressed = (flags & kCGEventFlagMaskCommand) == kCGEventFlagMaskCommand;
+        } else if ((warpMouse || focusOnDemand) && keycode == kVK_ANSI_Grave) {
+            CGEventFlags flags = CGEventGetFlags(event);
+            if ((flags & kCGEventFlagMaskCommand) == kCGEventFlagMaskCommand) {
+                if (!activated_by_task_switcher) {
+                    activated_by_task_switcher = true;
+                    // Extend ignore period for focus-on-demand to prevent race condition
+                    ignoreTimes = focusOnDemand ? 30 : 3;
+                    // Perform warping synchronously on press
+                    appActivated();
+                    // Schedule cursor scaling if needed
+                    if (cursorScale != oldScale) {
+                        [workspaceWatcher performSelector: @selector(onSetCursorScale:) withObject: [NSNumber numberWithFloat: cursorScale] afterDelay: SCALE_DELAY_MS/1000.0];
+                        [workspaceWatcher performSelector: @selector(onSetCursorScale:) withObject: [NSNumber numberWithFloat: oldScale] afterDelay: SCALE_DURATION_MS/1000.0];
+                    }
+                }
+            }
+        }
+    } else if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (verbose) { NSLog(@"Got event tap disabled event, re-enabling..."); }
+        CGEventTapEnable(eventTap, true);
+    }
+
+    // Focus-on-demand logic - handle AFTER task switcher logic
+    if (focusOnDemand && !activated_by_task_switcher && (type == kCGEventKeyDown || 
                          type == kCGEventFlagsChanged ||
                          type == kCGEventLeftMouseDown ||
                          type == kCGEventRightMouseDown ||
                          type == kCGEventOtherMouseDown ||
                          type == kCGEventScrollWheel)) {
         handleFocusOnDemand(event);
-    }
-    
-    static bool commandTabPressed = false;
-    if (type == kCGEventFlagsChanged && commandTabPressed) {
-        if (!activated_by_task_switcher) {
-            activated_by_task_switcher = true;
-            ignoreTimes = 3;
-        }
-    }
-
-    static bool commandGravePressed = false;
-    if (type == kCGEventFlagsChanged && commandGravePressed) {
-        if (!activated_by_task_switcher) {
-            activated_by_task_switcher = true;
-            ignoreTimes = 3;
-            [workspaceWatcher onAppActivated];
-        }
-    }
-
-    commandTabPressed = false;
-    commandGravePressed = false;
-    if (type == kCGEventKeyDown) {
-        CGKeyCode keycode = (CGKeyCode) CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
-        if (keycode == kVK_Tab) {
-            CGEventFlags flags = CGEventGetFlags(event);
-            commandTabPressed = (flags & kCGEventFlagMaskCommand) == kCGEventFlagMaskCommand;
-        } else if (warpMouse && keycode == kVK_ANSI_Grave) {
-            CGEventFlags flags = CGEventGetFlags(event);
-            commandGravePressed = (flags & kCGEventFlagMaskCommand) == kCGEventFlagMaskCommand;
-        }
-    } else if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-        if (verbose) { NSLog(@"Got event tap disabled event, re-enabling..."); }
-        CGEventTapEnable(eventTap, true);
     }
 
     return event;
