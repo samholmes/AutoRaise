@@ -150,6 +150,7 @@ static int delayTicks = 0;
 static int delayCount = 0;
 static int pollMillis = 0;
 static int disableKey = 0;
+static bool shouldFocusOnDemand = true;
 
 //----------------------------------------yabai focus only methods------------------------------------------
 
@@ -724,6 +725,12 @@ bool shouldFocusWindow(AXUIElementRef _window, pid_t window_pid) {
 void handleFocusOnDemand(CGEventRef event) {
     if (verbose) { NSLog(@"Focus-on-demand triggered"); }
     
+    // Check if we should focus based on cursor movement
+    if (!shouldFocusOnDemand) {
+        if (verbose) { NSLog(@"Focus-on-demand: cursor hasn't moved, skipping"); }
+        return;  // Early exit - cursor hasn't moved, don't change focus
+    }
+    
     // Get mouse position from the event
     CGPoint mousePoint = CGEventGetLocation(event);
     
@@ -767,6 +774,9 @@ void handleFocusOnDemand(CGEventRef event) {
                     
                     // Focus/raise BEFORE event continues to application
                     raiseAndActivate(_targetWindow, targetWindow_pid);
+                    
+                    // Clear the flag since we've now focused based on cursor position
+                    shouldFocusOnDemand = false;
                     
                     // Small delay to ensure focus completes before input reaches application
                     usleep(1000); // 1ms
@@ -881,6 +891,12 @@ static MDWorkspaceWatcher * workspaceWatcher = NULL;
         if (warpPoint.x != 0 || warpPoint.y != 0) {
             if (verbose) { NSLog(@"Warping cursor to focused window"); }
             CGWarpMouseCursorPosition(warpPoint);
+            
+            // Set flag to allow focusOnDemand after cursor warp
+            if (focusOnDemand) {
+                shouldFocusOnDemand = true;
+                if (verbose) { NSLog(@"Cursor warped via Cmd+`, enabling focusOnDemand"); }
+            }
         }
     }
     
@@ -1059,6 +1075,12 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
 void spaceChanged() {
     spaceHasChanged = true;
     oldPoint.x = oldPoint.y = 0;
+    
+    // Reset focusOnDemand tracking when changing spaces
+    if (focusOnDemand) {
+        shouldFocusOnDemand = true;
+        if (verbose) { NSLog(@"Space changed: Reset focusOnDemand tracking"); }
+    }
 }
 
 bool appActivated() {
@@ -1135,7 +1157,15 @@ bool appActivated() {
 
     if (_activatedWindow) {
         if (verbose) { NSLog(@"Warp mouse"); }
-        CGWarpMouseCursorPosition(get_mousepoint(_activatedWindow));
+        CGPoint warpPoint = get_mousepoint(_activatedWindow);
+        CGWarpMouseCursorPosition(warpPoint);
+        
+        // Set flag to allow focusOnDemand after cursor warp
+        if (focusOnDemand) {
+            shouldFocusOnDemand = true;
+            if (verbose) { NSLog(@"Cursor warped, enabling focusOnDemand"); }
+        }
+        
         if (!finder_app) { CFRelease(_activatedWindow); }
     }
 
@@ -1145,10 +1175,21 @@ bool appActivated() {
 void onTick() {
     // When focus-on-demand is enabled, disable all auto-raise logic
     if (focusOnDemand) {
-        // Still track mouse position for correction calculations
+        // Track mouse position to detect movement
         CGEventRef _event = CGEventCreate(NULL);
         CGPoint mousePoint = CGEventGetLocation(_event);
         if (_event) { CFRelease(_event); }
+        
+        // Check if mouse has moved
+        float mouse_x_diff = mousePoint.x - oldPoint.x;
+        float mouse_y_diff = mousePoint.y - oldPoint.y;
+        bool mouseMoved = fabs(mouse_x_diff) > mouseDelta || fabs(mouse_y_diff) > mouseDelta;
+        
+        if (mouseMoved && !shouldFocusOnDemand) {
+            shouldFocusOnDemand = true;
+            if (verbose) { NSLog(@"Mouse moved, enabling focusOnDemand"); }
+        }
+        
         oldPoint = mousePoint;
         return;
     }
@@ -1423,6 +1464,12 @@ CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef e
             activated_by_task_switcher = true;
             // Extend ignore period for focus-on-demand to prevent race condition
             ignoreTimes = focusOnDemand ? 30 : 3;
+            
+            // Reset focusOnDemand tracking to allow focus after task switch
+            if (focusOnDemand) {
+                shouldFocusOnDemand = true;
+                if (verbose) { NSLog(@"Cmd+Tab: Reset focusOnDemand tracking"); }
+            }
         }
     }
 
@@ -1440,6 +1487,13 @@ CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef e
                     waitingForWindowChange = true;  // Set flag to wait for AX notification
                     // Extend ignore period for focus-on-demand to prevent race condition
                     ignoreTimes = focusOnDemand ? 30 : 3;
+                    
+                    // Reset focusOnDemand tracking to allow focus after task switch
+                    if (focusOnDemand) {
+                        shouldFocusOnDemand = true;
+                        if (verbose) { NSLog(@"Cmd+`: Reset focusOnDemand tracking"); }
+                    }
+                    
                     if (verbose) { NSLog(@"Cmd+` detected, waiting for window focus change notification"); }
                     // Schedule timeout to clear flag if notification doesn't arrive
                     [workspaceWatcher performSelector:@selector(clearWaitingForWindowChange) 
