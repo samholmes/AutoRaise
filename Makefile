@@ -15,13 +15,14 @@ install: AutoRaise.app
 
 AutoRaise: AutoRaise.mm
         ifeq ($(SKYLIGHT_AVAILABLE), 1)
-	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit -F /System/Library/PrivateFrameworks -framework SkyLight
+	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit -framework QuartzCore -F /System/Library/PrivateFrameworks -framework SkyLight
         else
-	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit
+	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit -framework QuartzCore
         endif
 
 AutoRaise.app: AutoRaise Info.plist AutoRaise.icns
 	./create-app-bundle.sh
+	codesign --force --deep --sign - AutoRaise.app
 
 build: clean
 	make CXXFLAGS="-DOLD_ACTIVATION_METHOD -DEXPERIMENTAL_FOCUS_FIRST"

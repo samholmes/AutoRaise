@@ -10,6 +10,8 @@
     <string>Copyright © 2025 sbmpost</string>
     <key>CFBundleShortVersionString</key>
     <string>5.4</string>
+    <key>CFBundleVersion</key>
+    <string>5.4</string>
     <key>CFBundleIconFile</key>
     <string>AutoRaise</string>
     <key>CFBundleName</key>

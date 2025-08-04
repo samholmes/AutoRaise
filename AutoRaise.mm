@@ -27,6 +27,7 @@
 #include <AppKit/AppKit.h>
 #include <Carbon/Carbon.h>
 #include <libproc.h>
+#include <QuartzCore/QuartzCore.h>
 
 #define AUTORAISE_VERSION "5.4"
 #define STACK_THRESHOLD 20
@@ -151,6 +152,8 @@ static int delayCount = 0;
 static int pollMillis = 0;
 static int disableKey = 0;
 static bool shouldFocusOnDemand = true;
+
+static AXUIElementRef lastHighlightedWindow = NULL;
 
 //----------------------------------------yabai focus only methods------------------------------------------
 
@@ -311,10 +314,16 @@ NSDictionary * topwindow(CGPoint point) {
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
         kCGNullWindowID));
 
+    pid_t our_pid = [[NSProcessInfo processInfo] processIdentifier];
+
     for (NSDictionary * window in window_list) {
         NSDictionary * window_bounds_dict = window[(NSString *) CFBridgingRelease(kCGWindowBounds)];
 
         if (![window[(__bridge id) kCGWindowLayer] isEqual: @0]) { continue; }
+        
+        // Skip our own highlight window
+        pid_t window_pid = [window[(__bridge id) kCGWindowOwnerPID] intValue];
+        if (window_pid == our_pid) { continue; }
 
         NSRect window_bounds = NSMakeRect(
             [window_bounds_dict[@"X"] intValue],
@@ -442,7 +451,20 @@ AXUIElementRef get_mousewindow(CGPoint point) {
 
     AXUIElementRef _window = NULL;
     if (_element) {
-        _window = get_raisable_window(_element, point, 0);
+        // Check if this element belongs to our own process (highlight window)
+        pid_t element_pid;
+        if (AXUIElementGetPid(_element, &element_pid) == kAXErrorSuccess) {
+            pid_t our_pid = [[NSProcessInfo processInfo] processIdentifier];
+            if (element_pid == our_pid) {
+                // This is our highlight window, use fallback to find the window underneath
+                CFRelease(_element);
+                _window = fallback(point);
+            } else {
+                _window = get_raisable_window(_element, point, 0);
+            }
+        } else {
+            _window = get_raisable_window(_element, point, 0);
+        }
     } else if (error == kAXErrorCannotComplete || error == kAXErrorNotImplemented) {
         // fallback, happens for apps that do not support the Accessibility API
         if (verbose) { NSLog(@"Copy element: no accessibility support"); }
@@ -661,6 +683,195 @@ inline bool is_chrome_app(NSString * bundleIdentifier) {
            [components[3] isEqual: @"app"];
 }
 
+//---------------------------------------------highlight overlay methods------------------------------------------
+
+// Forward declarations
+void clearHighlight();
+void clearHighlightVisual();
+
+// Global highlight window
+static NSWindow* highlightWindow = nil;
+static dispatch_source_t highlightTimer = nil;
+
+void createHighlightWindow(CGRect windowBounds) {
+    // Clear any existing visual highlight
+    clearHighlightVisual();
+    
+    // Convert from Accessibility coordinates (top-left origin) to Cocoa coordinates (bottom-left origin)
+    // Find the primary screen (the one at origin 0,0) - this is what the Accessibility API uses as reference
+    NSScreen *primaryScreen = nil;
+    for (NSScreen *screen in [NSScreen screens]) {
+        if (NSEqualPoints(screen.frame.origin, NSZeroPoint)) {
+            primaryScreen = screen;
+            break;
+        }
+    }
+    
+    if (!primaryScreen) {
+        // Fallback to first screen if we can't find one at origin 0,0
+        primaryScreen = [NSScreen screens].firstObject;
+    }
+    
+    CGFloat primaryScreenHeight = primaryScreen.frame.size.height;
+    
+    // Debug: Log screen information
+    if (verbose) {
+        NSScreen *mainScreen = [NSScreen mainScreen];
+        NSLog(@"Primary screen (for coordinates): %@ (%.0f x %.0f)", 
+              primaryScreen.localizedName ?: @"Unknown",
+              primaryScreen.frame.size.width, primaryScreen.frame.size.height);
+        NSLog(@"Main screen (has focus): %@ (%.0f x %.0f) at origin (%.0f, %.0f)", 
+              mainScreen.localizedName ?: @"Unknown",
+              mainScreen.frame.size.width, mainScreen.frame.size.height,
+              mainScreen.frame.origin.x, mainScreen.frame.origin.y);
+        NSLog(@"Window bounds from AX API: (%.0f, %.0f) size (%.0f x %.0f)",
+              windowBounds.origin.x, windowBounds.origin.y,
+              windowBounds.size.width, windowBounds.size.height);
+    }
+    
+    // Convert Y coordinate using primary screen height
+    CGFloat convertedY = primaryScreenHeight - (windowBounds.origin.y + windowBounds.size.height);
+    NSRect frameRect = NSMakeRect(windowBounds.origin.x, convertedY, 
+                                  windowBounds.size.width, windowBounds.size.height);
+    
+    // Create window in main thread
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            // Create a borderless window
+            highlightWindow = [[NSWindow alloc] initWithContentRect:frameRect
+                                                          styleMask:NSWindowStyleMaskBorderless
+                                                            backing:NSBackingStoreBuffered
+                                                              defer:NO];
+            
+            // Create a custom view with border instead of filled background
+            NSView *contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, frameRect.size.width, frameRect.size.height)];
+            [contentView setWantsLayer:YES];
+            
+            // Create border effect
+            CALayer *layer = [contentView layer];
+            [layer setBackgroundColor:[[NSColor colorWithWhite:1.0 alpha:0.05] CGColor]];
+            [layer setBorderColor:[[NSColor clearColor] CGColor]];
+            [layer setBorderWidth:3.0];
+            [layer setCornerRadius:8.0];
+            
+            [highlightWindow setContentView:contentView];
+            [highlightWindow setBackgroundColor:[NSColor clearColor]];
+            [highlightWindow setOpaque:NO];
+            [highlightWindow setHasShadow:NO];
+            [highlightWindow setIgnoresMouseEvents:YES];
+            [highlightWindow setLevel:NSFloatingWindowLevel];
+            [highlightWindow setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces | 
+                                                  NSWindowCollectionBehaviorStationary |
+                                                  NSWindowCollectionBehaviorIgnoresCycle |
+                                                  NSWindowCollectionBehaviorFullScreenAuxiliary];
+            
+            // Start with window invisible
+            [highlightWindow setAlphaValue:0.0];
+            [highlightWindow orderFront:nil];
+            
+            // Fade in over 100ms
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                context.duration = 0.10;
+                [[highlightWindow animator] setAlphaValue:1.0];
+            } completionHandler:^{
+                // Then fade out over 200ms
+                [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                    context.duration = 0.2;
+                    [[highlightWindow animator] setAlphaValue:0.0];
+                } completionHandler:^{
+                    clearHighlightVisual();
+                }];
+            }];
+            
+            if (verbose) { 
+                NSLog(@"Created highlight window at (%.0f, %.0f) size (%.0f, %.0f)", 
+                      frameRect.origin.x, frameRect.origin.y, 
+                      frameRect.size.width, frameRect.size.height); 
+            }
+        }
+    });
+}
+
+void clearHighlightVisual() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            if (highlightTimer) {
+                dispatch_source_cancel(highlightTimer);
+                highlightTimer = nil;
+            }
+            
+            if (highlightWindow) {
+                [highlightWindow orderOut:nil];
+                highlightWindow = nil;
+                if (verbose) { NSLog(@"Cleared highlight window visual"); }
+            }
+        }
+    });
+}
+
+void clearHighlight() {
+    clearHighlightVisual();
+    
+    if (lastHighlightedWindow) {
+        CFRelease(lastHighlightedWindow);
+        lastHighlightedWindow = NULL;
+    }
+}
+
+void showHighlightForWindow(AXUIElementRef _window) {
+    if (!_window) {
+        // Only clear if we had a highlighted window before
+        if (lastHighlightedWindow) {
+            clearHighlight();
+        }
+        return;
+    }
+    
+    // Check if this is a different window than last time
+    bool isDifferentWindow = true;
+    if (lastHighlightedWindow) {
+        CGWindowID currentWindowID, lastWindowID;
+        if (_AXUIElementGetWindow(_window, &currentWindowID) == kAXErrorSuccess &&
+            _AXUIElementGetWindow(lastHighlightedWindow, &lastWindowID) == kAXErrorSuccess) {
+            isDifferentWindow = (currentWindowID != lastWindowID);
+        }
+    }
+    
+    // Show highlight only when entering a new window
+    if (isDifferentWindow) {
+        // Update last highlighted window
+        if (lastHighlightedWindow) {
+            CFRelease(lastHighlightedWindow);
+        }
+        lastHighlightedWindow = _window;
+        CFRetain(lastHighlightedWindow);
+        
+        // Get window bounds
+        AXValueRef _size = NULL;
+        AXValueRef _pos = NULL;
+        
+        if (AXUIElementCopyAttributeValue(_window, kAXSizeAttribute, (CFTypeRef *) &_size) == kAXErrorSuccess &&
+            AXUIElementCopyAttributeValue(_window, kAXPositionAttribute, (CFTypeRef *) &_pos) == kAXErrorSuccess) {
+            
+            CGSize cg_size;
+            CGPoint cg_pos;
+            if (AXValueGetValue(_size, kAXValueTypeCGSize, &cg_size) &&
+                AXValueGetValue(_pos, kAXValueTypeCGPoint, &cg_pos)) {
+                
+                CGRect windowBounds = CGRectMake(cg_pos.x, cg_pos.y, cg_size.width, cg_size.height);
+                createHighlightWindow(windowBounds);
+            }
+            
+            if (_size) CFRelease(_size);
+            if (_pos) CFRelease(_pos);
+        }
+        
+        if (verbose) {
+            logWindowTitle(@"Highlighting window", _window);
+        }
+    }
+}
+
 //---------------------------------------------focus-on-demand methods------------------------------------------
 
 CGPoint applyCorrectionToPoint(CGPoint mousePoint) {
@@ -725,12 +936,6 @@ bool shouldFocusWindow(AXUIElementRef _window, pid_t window_pid) {
 void handleFocusOnDemand(CGEventRef event) {
     if (verbose) { NSLog(@"Focus-on-demand triggered"); }
     
-    // Check if we should focus based on cursor movement
-    if (!shouldFocusOnDemand) {
-        if (verbose) { NSLog(@"Focus-on-demand: cursor hasn't moved, skipping"); }
-        return;  // Early exit - cursor hasn't moved, don't change focus
-    }
-    
     // Get mouse position from the event
     CGPoint mousePoint = CGEventGetLocation(event);
     
@@ -772,11 +977,11 @@ void handleFocusOnDemand(CGEventRef event) {
                 if (needsFocus) {
                     if (verbose) { NSLog(@"Focus-on-demand: raising window"); }
                     
+                    // Clear highlight before focusing
+                    clearHighlight();
+                    
                     // Focus/raise BEFORE event continues to application
                     raiseAndActivate(_targetWindow, targetWindow_pid);
-                    
-                    // Clear the flag since we've now focused based on cursor position
-                    shouldFocusOnDemand = false;
                     
                     // Small delay to ensure focus completes before input reaches application
                     usleep(1000); // 1ms
@@ -1079,6 +1284,7 @@ void spaceChanged() {
     // Reset focusOnDemand tracking when changing spaces
     if (focusOnDemand) {
         shouldFocusOnDemand = true;
+        clearHighlight(); // Clear any existing highlight
         if (verbose) { NSLog(@"Space changed: Reset focusOnDemand tracking"); }
     }
 }
@@ -1188,6 +1394,26 @@ void onTick() {
         if (mouseMoved && !shouldFocusOnDemand) {
             shouldFocusOnDemand = true;
             if (verbose) { NSLog(@"Mouse moved, enabling focusOnDemand"); }
+        }
+        
+        // Show highlight for window under cursor when mouse moves
+        if (mouseMoved) {
+            mousePoint = applyCorrectionToPoint(mousePoint);
+            AXUIElementRef _targetWindow = get_mousewindow(mousePoint);
+            if (_targetWindow) {
+                pid_t targetWindow_pid;
+                if (AXUIElementGetPid(_targetWindow, &targetWindow_pid) == kAXErrorSuccess) {
+                    if (shouldFocusWindow(_targetWindow, targetWindow_pid)) {
+                        // Show highlight for any window we enter (even if already focused)
+                        showHighlightForWindow(_targetWindow);
+                    } else {
+                        clearHighlight();
+                    }
+                }
+                CFRelease(_targetWindow);
+            } else {
+                clearHighlight();
+            }
         }
         
         oldPoint = mousePoint;
@@ -1708,6 +1934,17 @@ int main(int argc, const char * argv[]) {
 
         findDockApplication();
         findDesktopOrigin();
+        
+        // Cleanup handler for when app terminates
+        [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification
+                                                          object:nil
+                                                           queue:nil
+                                                      usingBlock:^(NSNotification *note) {
+            clearHighlight();
+            // Reset cursor scale on exit
+            CGSSetCursorScale(CGSMainConnectionID(), oldScale);
+        }];
+        
         [[NSApplication sharedApplication] run];
     }
     return 0;
