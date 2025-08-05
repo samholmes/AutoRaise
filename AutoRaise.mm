@@ -827,6 +827,12 @@ void showHighlightForWindow(AXUIElementRef _window) {
         return;
     }
     
+    // Don't show highlight when Mission Control is active
+    if (mc_active()) {
+        clearHighlight();
+        return;
+    }
+    
     // Check if this is a different window than last time
     bool isDifferentWindow = true;
     if (lastHighlightedWindow) {
@@ -935,6 +941,12 @@ bool shouldFocusWindow(AXUIElementRef _window, pid_t window_pid) {
 
 void handleFocusOnDemand(CGEventRef event) {
     if (verbose) { NSLog(@"Focus-on-demand triggered"); }
+    
+    // Don't handle focus-on-demand when Mission Control is active
+    if (mc_active()) {
+        if (verbose) { NSLog(@"Mission Control active, skipping focus-on-demand"); }
+        return;
+    }
     
     // Get mouse position from the event
     CGPoint mousePoint = CGEventGetLocation(event);
