@@ -688,12 +688,13 @@ inline bool is_chrome_app(NSString * bundleIdentifier) {
 // Forward declarations
 void clearHighlight();
 void clearHighlightVisual();
+void createHighlightWindow(CGRect windowBounds, CGWindowID targetWindowID);
 
 // Global highlight window
 static NSWindow* highlightWindow = nil;
 static dispatch_source_t highlightTimer = nil;
 
-void createHighlightWindow(CGRect windowBounds) {
+void createHighlightWindow(CGRect windowBounds, CGWindowID targetWindowID) {
     // Clear any existing visual highlight
     clearHighlightVisual();
     
@@ -759,7 +760,9 @@ void createHighlightWindow(CGRect windowBounds) {
             [highlightWindow setOpaque:NO];
             [highlightWindow setHasShadow:NO];
             [highlightWindow setIgnoresMouseEvents:YES];
-            [highlightWindow setLevel:NSFloatingWindowLevel];
+            
+            // Don't use a fixed window level - we'll position it relative to the target window
+            [highlightWindow setLevel:NSNormalWindowLevel];
             [highlightWindow setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces | 
                                                   NSWindowCollectionBehaviorStationary |
                                                   NSWindowCollectionBehaviorIgnoresCycle |
@@ -767,7 +770,9 @@ void createHighlightWindow(CGRect windowBounds) {
             
             // Start with window invisible
             [highlightWindow setAlphaValue:0.0];
-            [highlightWindow orderFront:nil];
+            
+            // Order the highlight window just above the target window
+            [highlightWindow orderWindow:NSWindowAbove relativeTo:(NSInteger)targetWindowID];
             
             // Fade in over 100ms
             [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
@@ -784,9 +789,10 @@ void createHighlightWindow(CGRect windowBounds) {
             }];
             
             if (verbose) { 
-                NSLog(@"Created highlight window at (%.0f, %.0f) size (%.0f, %.0f)", 
+                NSLog(@"Created highlight window at (%.0f, %.0f) size (%.0f, %.0f) above window ID %d", 
                       frameRect.origin.x, frameRect.origin.y, 
-                      frameRect.size.width, frameRect.size.height); 
+                      frameRect.size.width, frameRect.size.height,
+                      targetWindowID); 
             }
         }
     });
@@ -835,16 +841,20 @@ void showHighlightForWindow(AXUIElementRef _window) {
     
     // Check if this is a different window than last time
     bool isDifferentWindow = true;
+    CGWindowID currentWindowID = 0;
     if (lastHighlightedWindow) {
-        CGWindowID currentWindowID, lastWindowID;
+        CGWindowID lastWindowID;
         if (_AXUIElementGetWindow(_window, &currentWindowID) == kAXErrorSuccess &&
             _AXUIElementGetWindow(lastHighlightedWindow, &lastWindowID) == kAXErrorSuccess) {
             isDifferentWindow = (currentWindowID != lastWindowID);
         }
+    } else {
+        // Get the window ID for the first time
+        _AXUIElementGetWindow(_window, &currentWindowID);
     }
     
     // Show highlight only when entering a new window
-    if (isDifferentWindow) {
+    if (isDifferentWindow && currentWindowID != 0) {
         // Update last highlighted window
         if (lastHighlightedWindow) {
             CFRelease(lastHighlightedWindow);
@@ -865,7 +875,7 @@ void showHighlightForWindow(AXUIElementRef _window) {
                 AXValueGetValue(_pos, kAXValueTypeCGPoint, &cg_pos)) {
                 
                 CGRect windowBounds = CGRectMake(cg_pos.x, cg_pos.y, cg_size.width, cg_size.height);
-                createHighlightWindow(windowBounds);
+                createHighlightWindow(windowBounds, currentWindowID);
             }
             
             if (_size) CFRelease(_size);
