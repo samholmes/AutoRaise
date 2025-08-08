@@ -1897,15 +1897,14 @@ int main(int argc, const char * argv[]) {
         if (verbose) { NSLog(@"AXIsProcessTrusted: %s", trusted ? "YES" : "NO"); }
 
         if (!trusted) {
-            // Prompted the user to grant Accessibility permission. We can either wait for
-            // the user to grant the permission and then relaunch, or quit so the user
-            // must restart the app. Many apps poll AXIsProcessTrusted() to detect the
-            // change; it's not possible to receive a direct callback from the system.
-            // We'll poll for a short period and relaunch if granted; otherwise quit.
+            // Prompted the user to grant Accessibility permission. We poll AXIsProcessTrusted()
+            // and relaunch if the permission is granted. Increase responsiveness by polling
+            // more frequently and for a longer period. If relaunch via NSWorkspace fails,
+            // fall back to using `open -n`.
             NSLog(@"Accessibility permission is required. Please grant AutoRaise permission in System Settings -> Privacy & Security -> Accessibility.");
 
-            const int waitSeconds = 30; // total wait time
-            const int intervalMs = 500; // poll interval
+            const int waitSeconds = 120; // total wait time increased
+            const int intervalMs = 250;   // poll interval reduced for faster detection
             int waitedMs = 0;
 
             while (waitedMs < waitSeconds * 1000) {
@@ -1919,18 +1918,32 @@ int main(int argc, const char * argv[]) {
 
             if (trusted) {
                 NSLog(@"Accessibility permission granted — relaunching to apply permissions.");
-                // Relaunch the app using `open -n <bundlePath>` so the newly launched
-                // instance inherits the Accessibility permission and the current
-                // process can exit cleanly.
+
                 NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-                NSTask *openTask = [[NSTask alloc] init];
-                openTask.launchPath = @"/usr/bin/open";
-                openTask.arguments = @[ @"-n", bundlePath ];
-                @try {
-                    [openTask launch];
-                } @catch (NSException *e) {
-                    NSLog(@"Failed to relaunch via open: %@", e);
+                NSURL *bundleURL = [NSURL fileURLWithPath: bundlePath];
+
+                NSError *err = nil;
+                NSRunningApplication *launchedApp = [[NSWorkspace sharedWorkspace]
+                    launchApplicationAtURL: bundleURL
+                    options: NSWorkspaceLaunchNewInstance
+                    configuration: @{}
+                    error: &err];
+
+                if (launchedApp) {
+                    NSLog(@"Relaunch successful, launched PID: %d", launchedApp.processIdentifier);
+                } else {
+                    NSLog(@"NSWorkspace relaunch failed: %@ — falling back to open -n", err);
+                    NSTask *openTask = [[NSTask alloc] init];
+                    openTask.launchPath = @"/usr/bin/open";
+                    openTask.arguments = @[ @"-n", bundlePath ];
+                    @try {
+                        [openTask launch];
+                        NSLog(@"Launched via open -n");
+                    } @catch (NSException *e) {
+                        NSLog(@"Failed to relaunch via open: %@", e);
+                    }
                 }
+
                 // Exit current process — the relaunched app will continue with permissions.
                 exit(0);
             } else {
