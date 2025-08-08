@@ -155,6 +155,8 @@ static int disableKey = 0;
 static bool shouldFocusOnDemand = true;
 
 static AXUIElementRef lastHighlightedWindow = NULL;
+static AXUIElementRef pendingFocusWindow = NULL; // window pending focus when highlighted
+static CGWindowID currentFocusedWindowID = 0; // track focused window id for comparisons
 
 //----------------------------------------yabai focus only methods------------------------------------------
 
@@ -235,6 +237,12 @@ inline void raiseAndActivate(AXUIElementRef _window, pid_t window_pid) {
     if (verbose) { NSLog(@"Raise"); }
     if (AXUIElementPerformAction(_window, kAXRaiseAction) == kAXErrorSuccess) {
         activate(window_pid);
+        // Update our tracked focused window id if possible
+        CGWindowID wid = 0;
+        if (_AXUIElementGetWindow(_window, &wid) == kAXErrorSuccess) {
+            currentFocusedWindowID = wid;
+            if (verbose) { NSLog(@"Updated currentFocusedWindowID to %u", wid); }
+        }
     }
 }
 
@@ -823,6 +831,11 @@ void clearHighlight() {
         CFRelease(lastHighlightedWindow);
         lastHighlightedWindow = NULL;
     }
+
+    if (pendingFocusWindow) {
+        CFRelease(pendingFocusWindow);
+        pendingFocusWindow = NULL;
+    }
 }
 
 void showHighlightForWindow(AXUIElementRef _window) {
@@ -862,6 +875,21 @@ void showHighlightForWindow(AXUIElementRef _window) {
         }
         lastHighlightedWindow = _window;
         CFRetain(lastHighlightedWindow);
+
+        // Set pending focus only if this window isn't already the focused window
+        CGWindowID targetWindowID = 0;
+        if (_AXUIElementGetWindow(_window, &targetWindowID) == kAXErrorSuccess) {
+            if (targetWindowID != currentFocusedWindowID) {
+                if (pendingFocusWindow) { CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
+                pendingFocusWindow = _window;
+                CFRetain(pendingFocusWindow);
+                if (verbose) { NSLog(@"Pending focus window set to %u", targetWindowID); }
+            } else {
+                // If the window under the cursor is already focused, clear any pending focus
+                if (pendingFocusWindow) { CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
+                if (verbose) { NSLog(@"Window under cursor is already focused (%u), no pending focus set", targetWindowID); }
+            }
+        }
         
         // Get window bounds
         AXValueRef _size = NULL;
@@ -950,69 +978,82 @@ bool shouldFocusWindow(AXUIElementRef _window, pid_t window_pid) {
     return needs_raise;
 }
 
-void handleFocusOnDemand(CGEventRef event) {
+void handleFocusOnDemand(CGEventType type, CGEventRef event) {
     if (verbose) { NSLog(@"Focus-on-demand triggered"); }
-    
+
     // Don't handle focus-on-demand when Mission Control is active
     if (mc_active()) {
         if (verbose) { NSLog(@"Mission Control active, skipping focus-on-demand"); }
         return;
     }
-    
+
+    // Only handle explicit key down or mouse button down events
+    if (!(type == kCGEventKeyDown || type == kCGEventLeftMouseDown ||
+          type == kCGEventRightMouseDown || type == kCGEventOtherMouseDown)) {
+        if (verbose) { NSLog(@"Non-actionable event for focus-on-demand, ignoring"); }
+        return;
+    }
+
+    // If we don't have a pending focus window from highlighting, ignore
+    if (!pendingFocusWindow) {
+        if (verbose) { NSLog(@"No pending focus window, ignoring input"); }
+        return;
+    }
+
     // Get mouse position from the event
     CGPoint mousePoint = CGEventGetLocation(event);
-    
-    // Apply mouse correction for macOS Monterey+ window borders
     mousePoint = applyCorrectionToPoint(mousePoint);
-    
+
     // Find window under cursor
     AXUIElementRef _targetWindow = get_mousewindow(mousePoint);
-    if (_targetWindow) {
-        pid_t targetWindow_pid;
-        if (AXUIElementGetPid(_targetWindow, &targetWindow_pid) == kAXErrorSuccess) {
-            
-            // Apply filtering logic
-            if (shouldFocusWindow(_targetWindow, targetWindow_pid)) {
-                
-                // Check if target window is different from currently focused window
-                bool needsFocus = true;
-                NSRunningApplication *frontmostApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
-                pid_t frontmost_pid = frontmostApp.processIdentifier;
-                
-                if (targetWindow_pid == frontmost_pid) {
-                    // Same application - check if it's the same window
-                    AXUIElementRef _frontmostApp = AXUIElementCreateApplication(frontmost_pid);
-                    AXUIElementRef _focusedWindow = NULL;
-                    AXUIElementCopyAttributeValue(_frontmostApp, kAXFocusedWindowAttribute, (CFTypeRef *) &_focusedWindow);
-                    
-                    if (_focusedWindow) {
-                        // Compare window IDs to see if they're the same window
-                        CGWindowID targetWindowID, focusedWindowID;
-                        if (_AXUIElementGetWindow(_targetWindow, &targetWindowID) == kAXErrorSuccess &&
-                            _AXUIElementGetWindow(_focusedWindow, &focusedWindowID) == kAXErrorSuccess) {
-                            needsFocus = (targetWindowID != focusedWindowID);
-                        }
-                        CFRelease(_focusedWindow);
-                    }
-                    CFRelease(_frontmostApp);
-                }
-                
-                if (needsFocus) {
-                    if (verbose) { NSLog(@"Focus-on-demand: raising window"); }
-                    
-                    // Clear highlight before focusing
-                    clearHighlight();
-                    
-                    // Focus/raise BEFORE event continues to application
-                    raiseAndActivate(_targetWindow, targetWindow_pid);
-                    
-                    // Small delay to ensure focus completes before input reaches application
-                    usleep(1000); // 1ms
-                }
-            }
-        }
-        CFRelease(_targetWindow);
+    if (!_targetWindow) {
+        if (verbose) { NSLog(@"No window under cursor on input, ignoring"); }
+        return;
     }
+
+    // Compare pendingFocusWindow with the current target under cursor
+    CGWindowID pendingID = 0;
+    CGWindowID targetID = 0;
+    if (_AXUIElementGetWindow(pendingFocusWindow, &pendingID) != kAXErrorSuccess ||
+        _AXUIElementGetWindow(_targetWindow, &targetID) != kAXErrorSuccess) {
+        if (verbose) { NSLog(@"Unable to resolve window ids for pending/target, ignoring"); }
+        CFRelease(_targetWindow);
+        return;
+    }
+
+    // If pending differs from actual window under cursor, ignore
+    if (pendingID != targetID) {
+        if (verbose) { NSLog(@"Pending window (%u) differs from cursor window (%u), ignoring", pendingID, targetID); }
+        CFRelease(_targetWindow);
+        return;
+    }
+
+    // If the pending window is already the focused window, clear pending and ignore
+    if (pendingID == currentFocusedWindowID) {
+        if (verbose) { NSLog(@"Pending window %u is already focused, clearing pending", pendingID); }
+        CFRelease(_targetWindow);
+        CFRelease(pendingFocusWindow);
+        pendingFocusWindow = NULL;
+        return;
+    }
+
+    // Finally, perform the focus/raise
+    if (verbose) { NSLog(@"Focus-on-demand: focusing pending window %u", pendingID); }
+
+    // Clear highlight and pending before focusing to avoid race conditions
+    clearHighlight();
+    if (pendingFocusWindow) { CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
+
+    pid_t targetWindow_pid;
+    if (AXUIElementGetPid(_targetWindow, &targetWindow_pid) == kAXErrorSuccess) {
+        raiseAndActivate(_targetWindow, targetWindow_pid);
+        // Small delay to ensure focus completes before input reaches application
+        usleep(1000); // 1ms
+    } else if (verbose) {
+        NSLog(@"Unable to get pid for target window");
+    }
+
+    CFRelease(_targetWindow);
 }
 
 //-----------------------------------------------notifications----------------------------------------------
@@ -1160,6 +1201,13 @@ void windowFocusChangedCallback(AXObserverRef observer, AXUIElementRef element,
     if (verbose) { NSLog(@"Window focus changed notification received"); }
     
     waitingForWindowChange = false;
+
+    // Try to update our tracked focused window id from the AX notification
+    CGWindowID focused_wid = 0;
+    if (element && _AXUIElementGetWindow(element, &focused_wid) == kAXErrorSuccess) {
+        currentFocusedWindowID = focused_wid;
+        if (verbose) { NSLog(@"AX notification: updated currentFocusedWindowID to %u", focused_wid); }
+    }
     
     // Get the workspace watcher from refcon (passed during setup)
     MDWorkspaceWatcher *watcher = (__bridge MDWorkspaceWatcher *)refcon;
@@ -1755,13 +1803,13 @@ CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef e
     }
 
     // Focus-on-demand logic - handle AFTER task switcher logic
-    if (focusOnDemand && !activated_by_task_switcher && (type == kCGEventKeyDown || 
-                         type == kCGEventFlagsChanged ||
-                         type == kCGEventLeftMouseDown ||
-                         type == kCGEventRightMouseDown ||
-                         type == kCGEventOtherMouseDown ||
-                         type == kCGEventScrollWheel)) {
-        handleFocusOnDemand(event);
+    // Only trigger focus for explicit key presses or mouse button down events
+    if (focusOnDemand && !activated_by_task_switcher && (
+            type == kCGEventKeyDown ||
+            type == kCGEventLeftMouseDown ||
+            type == kCGEventRightMouseDown ||
+            type == kCGEventOtherMouseDown)) {
+        handleFocusOnDemand(type, event);
     }
 
     return event;
