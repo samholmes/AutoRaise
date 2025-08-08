@@ -345,6 +345,14 @@ NSDictionary * topwindow(CGPoint point) {
 
         if (NSPointInRect(NSPointFromCGPoint(point), window_bounds)) {
             top_window = window;
+            if (verbose && top_window) {
+                NSString *ownerName = top_window[(__bridge id) kCGWindowOwnerName];
+                NSNumber *winNum = top_window[(__bridge id) kCGWindowNumber];
+                NSNumber *pidNum = top_window[(__bridge id) kCGWindowOwnerPID];
+                NSString *winTitle = top_window[@"kCGWindowName"] ?: top_window[(__bridge id) kCGWindowName] ?: @"(null)";
+                NSLog(@"Top CG window under cursor: id=%@ pid=%@ owner=%@ title=%@ bounds=%@",
+                      winNum, pidNum, ownerName, winTitle, window_bounds_dict);
+            }
             break;
         }
     }
