@@ -28,6 +28,7 @@
 #include <Carbon/Carbon.h>
 #include <libproc.h>
 #include <QuartzCore/QuartzCore.h>
+#include <unistd.h>
 
 #define AUTORAISE_VERSION "5.4"
 #define STACK_THRESHOLD 20
@@ -1894,6 +1895,49 @@ int main(int argc, const char * argv[]) {
         NSDictionary * options = @{(id) CFBridgingRelease(kAXTrustedCheckOptionPrompt): @YES};
         bool trusted = AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef) options);
         if (verbose) { NSLog(@"AXIsProcessTrusted: %s", trusted ? "YES" : "NO"); }
+
+        if (!trusted) {
+            // Prompted the user to grant Accessibility permission. We can either wait for
+            // the user to grant the permission and then relaunch, or quit so the user
+            // must restart the app. Many apps poll AXIsProcessTrusted() to detect the
+            // change; it's not possible to receive a direct callback from the system.
+            // We'll poll for a short period and relaunch if granted; otherwise quit.
+            NSLog(@"Accessibility permission is required. Please grant AutoRaise permission in System Settings -> Privacy & Security -> Accessibility.");
+
+            const int waitSeconds = 30; // total wait time
+            const int intervalMs = 500; // poll interval
+            int waitedMs = 0;
+
+            while (waitedMs < waitSeconds * 1000) {
+                usleep(intervalMs * 1000);
+                waitedMs += intervalMs;
+                if (AXIsProcessTrusted()) {
+                    trusted = true;
+                    break;
+                }
+            }
+
+            if (trusted) {
+                NSLog(@"Accessibility permission granted — relaunching to apply permissions.");
+                // Relaunch the app using `open -n <bundlePath>` so the newly launched
+                // instance inherits the Accessibility permission and the current
+                // process can exit cleanly.
+                NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+                NSTask *openTask = [[NSTask alloc] init];
+                openTask.launchPath = @"/usr/bin/open";
+                openTask.arguments = @[ @"-n", bundlePath ];
+                @try {
+                    [openTask launch];
+                } @catch (NSException *e) {
+                    NSLog(@"Failed to relaunch via open: %@", e);
+                }
+                // Exit current process — the relaunched app will continue with permissions.
+                exit(0);
+            } else {
+                NSLog(@"Accessibility permission not granted. Quitting — please grant permission and restart AutoRaise.");
+                return 0;
+            }
+        }
 
         CGSGetCursorScale(CGSMainConnectionID(), &oldScale);
         if (verbose) { NSLog(@"System cursor scale: %f", oldScale); }
