@@ -466,43 +466,65 @@ AXUIElementRef get_raisable_window(AXUIElementRef _element, CGPoint point, int c
 }
 
 AXUIElementRef get_mousewindow(CGPoint point) {
+    if (verbose) { NSLog(@"get_mousewindow: probing at point (%.1f, %.1f)", point.x, point.y); }
     AXUIElementRef _element = NULL;
     AXError error = AXUIElementCopyElementAtPosition(_accessibility_object, point.x, point.y, &_element);
 
     AXUIElementRef _window = NULL;
     if (_element) {
+        // Log element diagnostics
+        if (verbose) {
+            pid_t elem_pid = -1;
+            if (AXUIElementGetPid(_element, &elem_pid) != kAXErrorSuccess) { elem_pid = -1; }
+            CFStringRef role = NULL;
+            CFStringRef subrole = NULL;
+            CFStringRef title = NULL;
+            AXUIElementCopyAttributeValue(_element, kAXRoleAttribute, (CFTypeRef *)&role);
+            AXUIElementCopyAttributeValue(_element, kAXSubroleAttribute, (CFTypeRef *)&subrole);
+            AXUIElementCopyAttributeValue(_element, kAXTitleAttribute, (CFTypeRef *)&title);
+            NSLog(@"AX element at point: ptr=%p pid=%d role=%@ subrole=%@ title=%@", _element, elem_pid,
+                  role ? (__bridge NSString *)role : @"(null)",
+                  subrole ? (__bridge NSString *)subrole : @"(null)",
+                  title ? (__bridge NSString *)title : @"(null)");
+            if (role) CFRelease(role);
+            if (subrole) CFRelease(subrole);
+            if (title) CFRelease(title);
+        }
+
         // Check if this element belongs to our own process (highlight window)
         pid_t element_pid;
         if (AXUIElementGetPid(_element, &element_pid) == kAXErrorSuccess) {
             pid_t our_pid = [[NSProcessInfo processInfo] processIdentifier];
             if (element_pid == our_pid) {
                 // This is our highlight window, use fallback to find the window underneath
+                if (verbose) { NSLog(@"get_mousewindow: element belongs to our PID (%d), using fallback", our_pid); }
                 CFRelease(_element);
                 _window = fallback(point);
             } else {
                 _window = get_raisable_window(_element, point, 0);
             }
         } else {
+            if (verbose) { NSLog(@"get_mousewindow: AXUIElementGetPid failed for element %p, trying raisable search", _element); }
             _window = get_raisable_window(_element, point, 0);
         }
     } else if (error == kAXErrorCannotComplete || error == kAXErrorNotImplemented) {
         // fallback, happens for apps that do not support the Accessibility API
-        if (verbose) { NSLog(@"Copy element: no accessibility support"); }
+        if (verbose) { NSLog(@"Copy element: no accessibility support (error=%d)", error); }
         _window = fallback(point);
     } else if (error == kAXErrorIllegalArgument) {
         // fallback, happens for Progressive Web Apps (PWAs)
-        if (verbose) { NSLog(@"Copy element: illegal argument"); }
+        if (verbose) { NSLog(@"Copy element: illegal argument (error=%d)", error); }
         _window = fallback(point);
     } else if (error == kAXErrorNoValue) {
         // fallback, happens sometimes when switching to another app (with cmd-tab)
-        if (verbose) { NSLog(@"Copy element: no value"); }
+        if (verbose) { NSLog(@"Copy element: no value (error=%d)", error); }
         _window = fallback(point);
     } else if (error == kAXErrorAttributeUnsupported) {
         // no fallback, happens when hovering into volume/WiFi menubar window
-        if (verbose) { NSLog(@"Copy element: attribute unsupported"); }
+        if (verbose) { NSLog(@"Copy element: attribute unsupported (error=%d)", error); }
     } else if (error == kAXErrorFailure) {
         // no fallback, happens when hovering over the menubar itself
-        if (verbose) { NSLog(@"Copy element: failure"); }
+        if (verbose) { NSLog(@"Copy element: failure (error=%d)", error); }
     } else if (verbose) {
         NSLog(@"Copy element: AXError %d", error);
     }
