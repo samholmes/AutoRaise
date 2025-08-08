@@ -1897,59 +1897,16 @@ int main(int argc, const char * argv[]) {
         if (verbose) { NSLog(@"AXIsProcessTrusted: %s", trusted ? "YES" : "NO"); }
 
         if (!trusted) {
-            // Prompted the user to grant Accessibility permission. We poll AXIsProcessTrusted()
-            // and relaunch if the permission is granted. Increase responsiveness by polling
-            // more frequently and for a longer period. If relaunch via NSWorkspace fails,
-            // fall back to using `open -n`.
+            // Prompt the user to grant Accessibility permission and then exit immediately.
+            // Exiting makes it straightforward for the user to grant permission in System Settings
+            // without the running app interfering. The user must restart the app after granting.
             NSLog(@"Accessibility permission is required. Please grant AutoRaise permission in System Settings -> Privacy & Security -> Accessibility.");
-
-            const int waitSeconds = 120; // total wait time increased
-            const int intervalMs = 250;   // poll interval reduced for faster detection
-            int waitedMs = 0;
-
-            while (waitedMs < waitSeconds * 1000) {
-                usleep(intervalMs * 1000);
-                waitedMs += intervalMs;
-                if (AXIsProcessTrusted()) {
-                    trusted = true;
-                    break;
-                }
-            }
-
-            if (trusted) {
-                NSLog(@"Accessibility permission granted — relaunching to apply permissions.");
-
-                NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-                NSURL *bundleURL = [NSURL fileURLWithPath: bundlePath];
-
-                NSError *err = nil;
-                NSRunningApplication *launchedApp = [[NSWorkspace sharedWorkspace]
-                    launchApplicationAtURL: bundleURL
-                    options: NSWorkspaceLaunchNewInstance
-                    configuration: @{}
-                    error: &err];
-
-                if (launchedApp) {
-                    NSLog(@"Relaunch successful, launched PID: %d", launchedApp.processIdentifier);
-                } else {
-                    NSLog(@"NSWorkspace relaunch failed: %@ — falling back to open -n", err);
-                    NSTask *openTask = [[NSTask alloc] init];
-                    openTask.launchPath = @"/usr/bin/open";
-                    openTask.arguments = @[ @"-n", bundlePath ];
-                    @try {
-                        [openTask launch];
-                        NSLog(@"Launched via open -n");
-                    } @catch (NSException *e) {
-                        NSLog(@"Failed to relaunch via open: %@", e);
-                    }
-                }
-
-                // Exit current process — the relaunched app will continue with permissions.
-                exit(0);
-            } else {
-                NSLog(@"Accessibility permission not granted. Quitting — please grant permission and restart AutoRaise.");
-                return 0;
-            }
+            NSLog(@"AutoRaise will now quit so you can grant the permission. Please restart AutoRaise after granting the permission.");
+            // Small sleep to allow the permission prompt to be presented on some macOS versions
+            // before the app exits. This is optional but helps the system show the UI.
+            sleep(1);
+            // Exit the process so the user can grant permission; they will need to relaunch.
+            exit(0);
         }
 
         CGSGetCursorScale(CGSMainConnectionID(), &oldScale);
