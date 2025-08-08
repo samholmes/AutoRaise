@@ -156,6 +156,9 @@ static bool shouldFocusOnDemand = true;
 
 static AXUIElementRef lastHighlightedWindow = NULL;
 static AXUIElementRef pendingFocusWindow = NULL; // window pending focus when highlighted
+static pid_t pendingFocusPID = -1; // pid of pending focus window (fallback)
+static NSString *pendingFocusTitle = NULL; // optional title for pending focus (fallback)
+static CGWindowID pendingFocusWindowID = 0; // stored CGWindowID for pending focus (fallback)
 static CGWindowID currentFocusedWindowID = 0; // track focused window id for comparisons
 
 //----------------------------------------yabai focus only methods------------------------------------------
@@ -828,67 +831,37 @@ void clearHighlight() {
     clearHighlightVisual();
     
     if (lastHighlightedWindow) {
+        if (verbose) { NSLog(@"Clearing lastHighlightedWindow %p", lastHighlightedWindow); }
         CFRelease(lastHighlightedWindow);
         lastHighlightedWindow = NULL;
     }
 
-    if (pendingFocusWindow) {
-        CFRelease(pendingFocusWindow);
-        pendingFocusWindow = NULL;
-    }
-}
-
-void showHighlightForWindow(AXUIElementRef _window) {
-    if (!_window) {
-        // Only clear if we had a highlighted window before
-        if (lastHighlightedWindow) {
-            clearHighlight();
-        }
-        return;
-    }
-    
-    // Don't show highlight when Mission Control is active
-    if (mc_active()) {
-        clearHighlight();
-        return;
-    }
-    
-    // Check if this is a different window than last time
-    bool isDifferentWindow = true;
-    CGWindowID currentWindowID = 0;
-    if (lastHighlightedWindow) {
-        CGWindowID lastWindowID;
-        if (_AXUIElementGetWindow(_window, &currentWindowID) == kAXErrorSuccess &&
-            _AXUIElementGetWindow(lastHighlightedWindow, &lastWindowID) == kAXErrorSuccess) {
-            isDifferentWindow = (currentWindowID != lastWindowID);
-        }
-    } else {
-        // Get the window ID for the first time
-        _AXUIElementGetWindow(_window, &currentWindowID);
-    }
-    
-    // Show highlight only when entering a new window
-    if (isDifferentWindow && currentWindowID != 0) {
-        // Update last highlighted window
-        if (lastHighlightedWindow) {
-            CFRelease(lastHighlightedWindow);
-        }
-        lastHighlightedWindow = _window;
-        CFRetain(lastHighlightedWindow);
-
-        // Set pending focus only if this window isn't already the focused window
-        CGWindowID targetWindowID = 0;
-        if (_AXUIElementGetWindow(_window, &targetWindowID) == kAXErrorSuccess) {
-            if (targetWindowID != currentFocusedWindowID) {
-                if (pendingFocusWindow) { CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
+                if (pendingFocusWindow) { 
+                    if (verbose) { NSLog(@"Replacing pendingFocusWindow %p", pendingFocusWindow); }
+                    CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
                 pendingFocusWindow = _window;
-                CFRetain(pendingFocusWindow);
-                if (verbose) { NSLog(@"Pending focus window set to %u", targetWindowID); }
+                // Store fallback metadata
+                pendingFocusPID = -1;
+                pendingFocusTitle = nil;
+                pendingFocusWindowID = targetWindowID;
+                if (AXUIElementGetPid(pendingFocusWindow, &pendingFocusPID) != kAXErrorSuccess) { pendingFocusPID = -1; }
+                CFStringRef tmpTitle = NULL;
+                AXUIElementCopyAttributeValue(pendingFocusWindow, kAXTitleAttribute, (CFTypeRef *)&tmpTitle);
+                if (tmpTitle) { pendingFocusTitle = (__bridge_transfer NSString *)tmpTitle; } else { pendingFocusTitle = nil; }
+                if (verbose) { NSLog(@"Pending focus window set to %u (AX=%p) pid=%d title=%@", targetWindowID, pendingFocusWindow, pendingFocusPID, pendingFocusTitle); }
+
+            } else {
+
+                        NSLog(@"Pending details: pid=%d title=(null)", pending_pid);
+                    }
+                }
             } else {
                 // If the window under the cursor is already focused, clear any pending focus
                 if (pendingFocusWindow) { CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
                 if (verbose) { NSLog(@"Window under cursor is already focused (%u), no pending focus set", targetWindowID); }
             }
+        } else if (verbose) {
+            NSLog(@"showHighlightForWindow: could not resolve CGWindowID for AX=%p", _window);
         }
         
         // Get window bounds
@@ -979,7 +952,7 @@ bool shouldFocusWindow(AXUIElementRef _window, pid_t window_pid) {
 }
 
 void handleFocusOnDemand(CGEventType type, CGEventRef event) {
-    if (verbose) { NSLog(@"Focus-on-demand triggered"); }
+    if (verbose) { NSLog(@"Focus-on-demand triggered (event type %d)", type); }
 
     // Don't handle focus-on-demand when Mission Control is active
     if (mc_active()) {
@@ -1003,37 +976,101 @@ void handleFocusOnDemand(CGEventType type, CGEventRef event) {
     // Get mouse position from the event
     CGPoint mousePoint = CGEventGetLocation(event);
     mousePoint = applyCorrectionToPoint(mousePoint);
+    if (verbose) { NSLog(@"Input at point (%.1f, %.1f)", mousePoint.x, mousePoint.y); }
 
-    // Find window under cursor
+    // Find window under cursor (AX) and also the topmost CG window
     AXUIElementRef _targetWindow = get_mousewindow(mousePoint);
-    if (!_targetWindow) {
-        if (verbose) { NSLog(@"No window under cursor on input, ignoring"); }
+    NSDictionary * top_win = topwindow(mousePoint);
+
+    if (!_targetWindow && !top_win) {
+        if (verbose) { NSLog(@"No window under cursor on input (AX and CG), ignoring"); }
         return;
     }
 
-    // Compare pendingFocusWindow with the current target under cursor
+    // Resolve IDs for logging and comparisons
     CGWindowID pendingID = 0;
-    CGWindowID targetID = 0;
-    if (_AXUIElementGetWindow(pendingFocusWindow, &pendingID) != kAXErrorSuccess ||
-        _AXUIElementGetWindow(_targetWindow, &targetID) != kAXErrorSuccess) {
-        if (verbose) { NSLog(@"Unable to resolve window ids for pending/target, ignoring"); }
-        CFRelease(_targetWindow);
-        return;
+    CGWindowID targetAXID = 0;
+    CGWindowID targetCGID = 0;
+    pid_t target_ax_pid = -1;
+
+    if (pendingFocusWindow) {
+        if (_AXUIElementGetWindow(pendingFocusWindow, &pendingID) != kAXErrorSuccess) {
+            if (verbose) { NSLog(@"Unable to resolve CGWindowID for pendingFocusWindow AX=%p", pendingFocusWindow); }
+            pendingID = 0;
+        }
     }
 
-    // If pending differs from actual window under cursor, ignore
-    if (pendingID != targetID) {
-        if (verbose) { NSLog(@"Pending window (%u) differs from cursor window (%u), ignoring", pendingID, targetID); }
-        CFRelease(_targetWindow);
+    if (_targetWindow) {
+        if (_AXUIElementGetWindow(_targetWindow, &targetAXID) != kAXErrorSuccess) {
+            if (verbose) { NSLog(@"Unable to resolve CGWindowID for target AX element AX=%p", _targetWindow); }
+            targetAXID = 0;
+        }
+        if (AXUIElementGetPid(_targetWindow, &target_ax_pid) != kAXErrorSuccess) { target_ax_pid = -1; }
+    }
+
+    if (top_win) {
+        targetCGID = [top_win[(__bridge id) kCGWindowNumber] intValue];
+    }
+
+    if (verbose) {
+        NSLog(@"Pending CG=%u, Target(AX) CG=%u, Target(CG top)=%u, currentFocused=%u, target_pid=%d",
+              pendingID, targetAXID, targetCGID, currentFocusedWindowID, target_ax_pid);
+    }
+
+    // Prefer AX targetID if we have it, otherwise rely on CG top window
+    CGWindowID effectiveTargetID = targetAXID ? targetAXID : targetCGID;
+
+    if (pendingID == 0) {
+        if (verbose) { NSLog(@"Pending ID unknown, attempting fallback by PID/title (pending pid=%d title=%@)", pendingFocusPID, pendingFocusTitle); }
+        // Try PID/title fallback
+        if (pendingFocusPID == -1 && pendingFocusTitle == nil) {
+            if (verbose) { NSLog(@"No fallback metadata available, cannot safely focus, ignoring"); }
+            if (_targetWindow) CFRelease(_targetWindow);
+            return;
+        }
+    }
+
+    if (effectiveTargetID == 0) {
+        if (verbose) { NSLog(@"Cannot resolve target window id under cursor (both AX and CG), attempting fallback by pid/title"); }
+        // if we can't resolve effective target id, try comparing pid/title
+        if (_targetWindow) {
+            pid_t t_pid = -1;
+            AXUIElementGetPid(_targetWindow, &t_pid);
+            CFStringRef t_title = NULL;
+            AXUIElementCopyAttributeValue(_targetWindow, kAXTitleAttribute, (CFTypeRef *)&t_title);
+            bool fallbackMatch = false;
+            if (pendingFocusPID != -1 && t_pid == pendingFocusPID) {
+                fallbackMatch = true;
+            } else if (pendingFocusTitle && t_title) {
+                NSString *tt = (__bridge NSString *)t_title;
+                fallbackMatch = [tt isEqualToString: pendingFocusTitle];
+            }
+            if (t_title) CFRelease(t_title);
+            if (!fallbackMatch) {
+                if (verbose) { NSLog(@"Fallback did not match pending metadata, ignoring"); }
+                CFRelease(_targetWindow);
+                return;
+            } else {
+                if (verbose) { NSLog(@"Fallback matched by pid/title, proceeding to focus"); }
+            }
+        } else {
+            if (verbose) { NSLog(@"No AX target to fallback on, ignoring"); }
+            return;
+        }
+    }
+
+    // If pending differs from actual effective target under cursor, ignore
+    if (pendingID != 0 && pendingID != effectiveTargetID) {
+        if (verbose) { NSLog(@"Pending window (%u) differs from effective cursor window (%u), ignoring", pendingID, effectiveTargetID); }
+        if (_targetWindow) CFRelease(_targetWindow);
         return;
     }
 
     // If the pending window is already the focused window, clear pending and ignore
     if (pendingID == currentFocusedWindowID) {
         if (verbose) { NSLog(@"Pending window %u is already focused, clearing pending", pendingID); }
-        CFRelease(_targetWindow);
-        CFRelease(pendingFocusWindow);
-        pendingFocusWindow = NULL;
+        if (_targetWindow) CFRelease(_targetWindow);
+        if (pendingFocusWindow) { CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
         return;
     }
 
@@ -1045,15 +1082,39 @@ void handleFocusOnDemand(CGEventType type, CGEventRef event) {
     if (pendingFocusWindow) { CFRelease(pendingFocusWindow); pendingFocusWindow = NULL; }
 
     pid_t targetWindow_pid;
-    if (AXUIElementGetPid(_targetWindow, &targetWindow_pid) == kAXErrorSuccess) {
-        raiseAndActivate(_targetWindow, targetWindow_pid);
+    // prefer pid from AX target if available, otherwise try to get pid from top_win
+    if (target_ax_pid != -1) {
+        targetWindow_pid = target_ax_pid;
+    } else if (top_win) {
+        targetWindow_pid = [top_win[(__bridge id) kCGWindowOwnerPID] intValue];
+    } else {
+        targetWindow_pid = -1;
+    }
+
+    if (targetWindow_pid != -1) {
+        if (_targetWindow) {
+            raiseAndActivate(_targetWindow, targetWindow_pid);
+        } else if (top_win) {
+            // Fallback: create an AXUIS element for the pid and attempt to raise main window
+            AXUIElementRef app = AXUIElementCreateApplication(targetWindow_pid);
+            AXUIElementRef mainWin = NULL;
+            AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute, (CFTypeRef *)&mainWin);
+            if (!mainWin) { AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute, (CFTypeRef *)&mainWin); }
+            if (mainWin) {
+                raiseAndActivate(mainWin, targetWindow_pid);
+                CFRelease(mainWin);
+            } else if (verbose) {
+                NSLog(@"Fallback: could not find main/focused window for pid %d", targetWindow_pid);
+            }
+            CFRelease(app);
+        }
         // Small delay to ensure focus completes before input reaches application
         usleep(1000); // 1ms
     } else if (verbose) {
         NSLog(@"Unable to get pid for target window");
     }
 
-    CFRelease(_targetWindow);
+    if (_targetWindow) CFRelease(_targetWindow);
 }
 
 //-----------------------------------------------notifications----------------------------------------------
@@ -2004,9 +2065,9 @@ int main(int argc, const char * argv[]) {
             }
         }
 #ifdef FOCUS_FIRST
-        if (altTaskSwitcher || raiseDelayCount || delayCount) {
+        if (altTaskSwitcher || raiseDelayCount || delayCount || focusOnDemand) {
 #else
-        if (altTaskSwitcher || delayCount) {
+        if (altTaskSwitcher || delayCount || focusOnDemand) {
 #endif
             [workspaceWatcher onTick: [NSNumber numberWithFloat: pollMillis/1000.0]];
         }
