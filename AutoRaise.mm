@@ -140,7 +140,7 @@ static bool appWasActivated = false;
 static bool altTaskSwitcher = false;
 static bool warpMouse = false;
 static bool verbose = false;
-static bool focusOnDemand = false;
+static bool focusOnDemand = true;
 static float warpX = 0.5;
 static float warpY = 0.5;
 static float oldScale = 1;
@@ -1192,16 +1192,16 @@ const NSString *kIgnoreTitles = @"ignoreTitles";
 const NSString *kMouseDelta = @"mouseDelta";
 const NSString *kPollMillis = @"pollMillis";
 const NSString *kDisableKey = @"disableKey";
-const NSString *kFocusOnDemand = @"focusOnDemand";
+
 #ifdef FOCUS_FIRST
 const NSString *kFocusDelay = @"focusDelay";
 NSArray *parametersDictionary = @[kDelay, kWarpX, kWarpY, kScale, kVerbose, kAltTaskSwitcher,
     kFocusDelay, kIgnoreSpaceChanged, kInvertIgnoreApps, kIgnoreApps, kIgnoreTitles,
-    kStayFocusedBundleIds, kDisableKey, kMouseDelta, kPollMillis, kFocusOnDemand];
+    kStayFocusedBundleIds, kDisableKey, kMouseDelta, kPollMillis];
 #else
 NSArray *parametersDictionary = @[kDelay, kWarpX, kWarpY, kScale, kVerbose, kAltTaskSwitcher,
     kIgnoreSpaceChanged, kInvertIgnoreApps, kIgnoreApps, kIgnoreTitles, kStayFocusedBundleIds,
-    kDisableKey, kMouseDelta, kPollMillis, kFocusOnDemand];
+    kDisableKey, kMouseDelta, kPollMillis];
 #endif
 NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
 
@@ -1273,8 +1273,7 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
 #else
     if (!parameters[kDelay]) {
 #endif
-        parameters[kDelay] = @"1";
-    }
+parameters[kDelay] = @"0";    }
     if ([parameters[kPollMillis] intValue] < 20) { parameters[kPollMillis] = @"50"; }
     if ([parameters[kMouseDelta] floatValue] < 0) { parameters[kMouseDelta] = @"0"; }
     if ([parameters[kScale] floatValue] < 1) { parameters[kScale] = @"2.0"; }
@@ -1283,10 +1282,8 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
         parameters[kWarpX] && [parameters[kWarpX] floatValue] >= 0 && [parameters[kWarpX] floatValue] <= 1 &&
         parameters[kWarpY] && [parameters[kWarpY] floatValue] >= 0 && [parameters[kWarpY] floatValue] <= 1;
     
-    // When focus-on-demand is enabled, disable timer-based raising
-    if ([parameters[kFocusOnDemand] boolValue]) {
-        parameters[kDelay] = @"0";
-    }
+    // focus-on-demand is default; ensure delay defaults to 0 if not specified
+    if (!parameters[kDelay]) { parameters[kDelay] = @"0"; }
 #ifdef ALTERNATIVE_TASK_SWITCHER
     if (!parameters[kAltTaskSwitcher]) { parameters[kAltTaskSwitcher] = @"true"; }
 #endif
@@ -1712,7 +1709,7 @@ CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef e
         if (!activated_by_task_switcher) {
             activated_by_task_switcher = true;
             // Extend ignore period for focus-on-demand to prevent race condition
-            ignoreTimes = focusOnDemand ? 30 : 3;
+            ignoreTimes = 30;
             
             // Reset focusOnDemand tracking to allow focus after task switch
             if (focusOnDemand) {
@@ -1735,7 +1732,7 @@ CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef e
                     activated_by_task_switcher = true;
                     waitingForWindowChange = true;  // Set flag to wait for AX notification
                     // Extend ignore period for focus-on-demand to prevent race condition
-                    ignoreTimes = focusOnDemand ? 30 : 3;
+                    ignoreTimes = 30;
                     
                     // Reset focusOnDemand tracking to allow focus after task switch
                     if (focusOnDemand) {
@@ -1786,7 +1783,7 @@ int main(int argc, const char * argv[]) {
         pollMillis         = [parameters[kPollMillis] intValue];
         ignoreSpaceChanged = [parameters[kIgnoreSpaceChanged] boolValue];
         invertIgnoreApps   = [parameters[kInvertIgnoreApps] boolValue];
-        focusOnDemand      = [parameters[kFocusOnDemand] boolValue];
+        // focusOnDemand is enabled by default
 
         printf("\nv%s by sbmpost(c) 2025, usage:\n\nAutoRaise\n", AUTORAISE_VERSION);
         printf("  -pollMillis <20, 30, 40, 50, ...>\n");
@@ -1803,7 +1800,7 @@ int main(int argc, const char * argv[]) {
         printf("  -stayFocusedBundleIds \"<Id1,Id2,...>\"\n");
         printf("  -disableKey <control|option|disabled>\n");
         printf("  -mouseDelta <0.1>\n");
-        printf("  -focusOnDemand <true|false>\n");
+        
         printf("  -verbose <true|false>\n\n");
 
         printf("Started with:\n");
@@ -1876,7 +1873,7 @@ int main(int argc, const char * argv[]) {
 
         if (mouseDelta) { printf("  * mouseDelta: %.1f\n", mouseDelta); }
 
-        printf("  * focusOnDemand: %s\n", focusOnDemand ? "true" : "false");
+        printf("  * focusOnDemand: enabled (default)\n");
         printf("  * verbose: %s\n", verbose ? "true" : "false");
 #if defined OLD_ACTIVATION_METHOD or defined FOCUS_FIRST or defined ALTERNATIVE_TASK_SWITCHER
         printf("\nCompiled with:\n");
@@ -1915,13 +1912,11 @@ int main(int argc, const char * argv[]) {
         CFRunLoopSourceRef runLoopSource = NULL;
         CGEventMask eventMask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged);
         
-        // Add additional events for focus-on-demand mode
-        if (focusOnDemand) {
-            eventMask |= CGEventMaskBit(kCGEventLeftMouseDown) |
-                        CGEventMaskBit(kCGEventRightMouseDown) |
-                        CGEventMaskBit(kCGEventOtherMouseDown) |
-                        CGEventMaskBit(kCGEventScrollWheel);
-        }
+        // Focus-on-demand always enabled: include additional events
+        eventMask |= CGEventMaskBit(kCGEventLeftMouseDown) |
+                    CGEventMaskBit(kCGEventRightMouseDown) |
+                    CGEventMaskBit(kCGEventOtherMouseDown) |
+                    CGEventMaskBit(kCGEventScrollWheel);
         
         eventTap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
             eventMask, eventTapHandler, NULL);
